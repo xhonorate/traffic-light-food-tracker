@@ -1,0 +1,32 @@
+{
+  "indexes": [
+    {
+      "comment": "Family logger: one member's entries across a date window.",
+      "collectionGroup": "entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "memberId", "order": "ASCENDING" },
+        { "fieldPath": "date", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "comment": "Coach and admin views: a family's whole log across a window.",
+      "collectionGroup": "entries",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "date", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "comment": "Quick-add chips, most used first.",
+      "collectionGroup": "quickFoods",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "useCount", "order": "DESCENDING" },
+        { "fieldPath": "lastUsedAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

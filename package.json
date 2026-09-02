@@ -1,0 +1,40 @@
+{
+  "name": "traffic-light-food-tracker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "emulators": "firebase emulators:start",
+    "deploy": "npm run build && firebase deploy",
+    "deploy:hosting": "npm run build && firebase deploy --only hosting",
+    "deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes",
+    "deploy:functions": "firebase deploy --only functions",
+    "test:rules": "esbuild scripts/rule-parity.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/rule-parity.mjs --log-level=error && node node_modules/.cache/rule-parity.mjs",
+    "test:goals": "esbuild scripts/goals-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/goals-check.mjs --log-level=error && node node_modules/.cache/goals-check.mjs",
+    "test:rank": "esbuild scripts/food-rank.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/food-rank.mjs --log-level=error && node node_modules/.cache/food-rank.mjs",
+    "test": "npm run test:rules && npm run test:goals && npm run test:rank",
+    "test:usda": "esbuild scripts/usda-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/usda-check.mjs --log-level=error && node node_modules/.cache/usda-check.mjs"
+  },
+  "dependencies": {
+    "@heroicons/react": "^2.2.0",
+    "firebase": "^12.18.0",
+    "html5-qrcode": "^2.3.8",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "esbuild": "^0.28.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.2"
+  }
+}

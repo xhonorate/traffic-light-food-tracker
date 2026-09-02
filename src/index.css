@@ -1,0 +1,147 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens. The traffic-light trio is the app's whole visual language,
+   so it is defined once here and never hand-rolled at call sites.
+   --------------------------------------------------------------------------- */
+@theme {
+  --font-sans:
+    "Inter var", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  --color-brand-50: oklch(0.97 0.03 155);
+  --color-brand-100: oklch(0.94 0.06 155);
+  --color-brand-200: oklch(0.88 0.1 155);
+  --color-brand-300: oklch(0.8 0.14 155);
+  --color-brand-400: oklch(0.72 0.16 155);
+  --color-brand-500: oklch(0.64 0.17 155);
+  --color-brand-600: oklch(0.55 0.15 155);
+  --color-brand-700: oklch(0.45 0.12 155);
+  --color-brand-800: oklch(0.37 0.09 155);
+  --color-brand-900: oklch(0.3 0.07 155);
+  --color-brand-950: oklch(0.2 0.05 155);
+
+  --radius-card: 1rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Traffic-light data colors.
+
+   These are STATUS colors -- the hue *is* the datum -- so they are picked and
+   validated separately from the brand ramp, and each mode gets its own steps
+   rather than an automatic flip. Verified with the dataviz six-check
+   validator (lightness band, chroma floor, CVD separation, normal-vision
+   floor, surface contrast):
+
+     light  #047857 / #d97706 / #be123c   all five checks pass
+     dark   #059669 / #d97706 / #e11d48   CVD separation 7.9 (protan), which
+                                          sits in the 6-8 floor band
+
+   That floor band is only permissible alongside secondary encoding, so every
+   place these appear also carries a shape (circle / triangle / hexagon) and
+   the written word. color is never the sole channel anywhere in this app --
+   see <ColorMark> in components/TrafficLight.tsx.
+   --------------------------------------------------------------------------- */
+:root {
+  --tl-green: #047857;
+  --tl-yellow: #d97706;
+  --tl-red: #be123c;
+  --tl-green-soft: #ecfdf5;
+  --tl-yellow-soft: #fffbeb;
+  --tl-red-soft: #fff1f2;
+  --tl-grid: #e2e8f0;
+}
+
+.dark {
+  --tl-green: #059669;
+  --tl-yellow: #d97706;
+  --tl-red: #e11d48;
+  --tl-green-soft: #022c22;
+  --tl-yellow-soft: #2a1a05;
+  --tl-red-soft: #2b0a15;
+  --tl-grid: #1e293b;
+}
+
+/* Dark mode follows an explicit `.dark` class on <html> so the toggle can
+   override the OS preference in both directions. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    @apply dark:bg-slate-950 dark:text-slate-100;
+    /* Respect iOS safe areas when installed to the home screen. */
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Inputs on iOS zoom the viewport below 16px; keep them at or above it. */
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1rem);
+  }
+
+  /* Tailwind v4 dropped the old `cursor: pointer` reset on buttons, which
+     leaves every button feeling inert on hover. Restore it once here rather
+     than sprinkling `cursor-pointer` across dozens of call sites, and cover
+     the other things that behave like buttons. */
+  button:not(:disabled),
+  summary,
+  label:has(> input[type="checkbox"]),
+  label:has(> input[type="radio"]),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="radio"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-brand-600;
+  }
+
+  /* Number inputs: hide spinners, they are fiddly on touch. */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer utilities {
+  /* Horizontal scrollers (chips, day strips) without a visible scrollbar. */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tap {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

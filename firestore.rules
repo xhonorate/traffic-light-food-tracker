@@ -1,0 +1,148 @@
+rules_version = '2';
+
+// ---------------------------------------------------------------------------
+// Access model
+//
+//   admin   - everything
+//   coach   - only the families whose `coachId` is their own uid
+//   family  - only their own family document and its logs
+//
+// Roles come from custom claims minted by Cloud Functions, never from a
+// client-writable document, so a client cannot promote itself. Anything that
+// creates, deletes or re-keys an account is denied here outright and lives in
+// a Cloud Function instead.
+// ---------------------------------------------------------------------------
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return signedIn() ? request.auth.token.get('role', '') : '';
+    }
+
+    function isAdmin() { return role() == 'admin'; }
+    function isCoach() { return role() == 'coach'; }
+    function isStaff() { return isAdmin() || isCoach(); }
+    function isFamily() { return role() == 'family'; }
+
+    function myFamilyId() {
+      return request.auth.token.get('familyId', '');
+    }
+
+    function familyDoc(familyId) {
+      return get(/databases/$(database)/documents/families/$(familyId)).data;
+    }
+
+    // Which fields an update actually touches.
+    function touched() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Can this caller see a given family's records at all?
+    function canReadFamily(familyId) {
+      return isAdmin()
+        || (isFamily() && familyId == myFamilyId())
+        || (isCoach() && familyDoc(familyId).coachId == request.auth.uid);
+    }
+
+    // -----------------------------------------------------------------------
+    // Program configuration: color rules and app settings.
+    // Everyone signed in must be able to read the rules (the family app scores
+    // foods on-device); only admins may change them.
+    // -----------------------------------------------------------------------
+    match /config/{document} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // -----------------------------------------------------------------------
+    // Staff accounts.
+    // -----------------------------------------------------------------------
+    match /users/{uid} {
+      allow read: if isStaff();
+
+      // Admins may toggle `disabled` and edit names. Anyone may stamp their
+      // own lastLoginAt. Crucially `role` is never client-writable -- it is a
+      // mirror of the custom claim, and changing it here would grant nothing
+      // but would badly mislead the UI.
+      allow update: if (isAdmin() && !touched().hasAny(['role', 'email', 'createdAt']))
+        || (signedIn() && request.auth.uid == uid && touched().hasOnly(['lastLoginAt']));
+
+      // Creating and deleting accounts must go through Cloud Functions so the
+      // Auth record and this document stay in step.
+      allow create, delete: if false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Access codes. Never readable by any client -- a readable code collection
+    // would let one family enumerate every other family's login. The only way
+    // to test a code is the `redeemFamilyCode` function.
+    // -----------------------------------------------------------------------
+    match /codes/{code} {
+      allow read, write: if false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Families.
+    // -----------------------------------------------------------------------
+    match /families/{familyId} {
+      // `list` for a coach is safe because the client query filters on
+      // coachId, which Firestore verifies against this condition.
+      allow read: if isAdmin()
+        || (isFamily() && familyId == myFamilyId())
+        || (isCoach() && resource.data.coachId == request.auth.uid);
+
+      allow update: if
+        // Admin: anything except re-keying the code or owner by hand.
+        (isAdmin() && !touched().hasAny(['code', 'createdAt']))
+        // Coach: only their own families, and not the code or ownership.
+        || (isCoach()
+            && resource.data.coachId == request.auth.uid
+            && !touched().hasAny(['code', 'coachId', 'createdAt']))
+        // Family: may only report that they are active.
+        || (isFamily()
+            && familyId == myFamilyId()
+            && touched().hasOnly(['lastActiveAt']));
+
+      // Codes are allocated transactionally server-side, so creation and
+      // deletion belong to Cloud Functions.
+      allow create, delete: if false;
+
+      // ---------------------------------------------------------------------
+      // Food log. Either member may read and write the whole family's log --
+      // requirement 5 makes this deliberate, not an oversight.
+      // ---------------------------------------------------------------------
+      match /entries/{entryId} {
+        allow read: if canReadFamily(familyId);
+
+        allow create: if isFamily()
+          && familyId == myFamilyId()
+          && request.resource.data.memberId in ['parent', 'child']
+          && request.resource.data.color in ['green', 'yellow', 'red']
+          && request.resource.data.autoColor in ['green', 'yellow', 'red']
+          && request.resource.data.servings is number
+          && request.resource.data.servings > 0
+          && request.resource.data.servings <= 50
+          && request.resource.data.date is string
+          && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && request.resource.data.name is string
+          && request.resource.data.name.size() <= 300;
+
+        allow update, delete: if isFamily() && familyId == myFamilyId();
+      }
+
+      match /quickFoods/{quickId} {
+        allow read: if canReadFamily(familyId);
+        allow write: if isFamily() && familyId == myFamilyId();
+      }
+    }
+
+    // No catch-all block is needed: Firestore denies by default, and because
+    // rule results are OR-ed together a trailing `allow ... if false` would
+    // deny nothing while implying it does.
+  }
+}
