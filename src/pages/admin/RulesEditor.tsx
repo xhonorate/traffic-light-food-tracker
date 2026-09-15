@@ -35,6 +35,7 @@ import {
   COLOR_ORDER,
   COLOR_WORD,
 } from "../../components/TrafficLight";
+import CategoryInput from "../../components/CategoryInput";
 import RuleTester from "./RuleTester";
 
 const MISSING_POLICIES: { value: MissingPolicy; label: string }[] = [
@@ -826,30 +827,27 @@ function ConditionRow({
           <option value="includesAny">Category is one of…</option>
           <option value="excludesAll">Category is none of…</option>
         </Select>
-        <Input
-          value={condition.values.join(", ")}
-          onChange={(e) =>
-            onChange({
-              ...condition,
-              values: e.target.value
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            })
-          }
-          placeholder="sugary-snacks, candies, biscuits"
+        <CategoryInput
+          values={condition.values}
+          onChange={(values) => onChange({ ...condition, values })}
+          placeholder="Type or pick a category, e.g. sugary-snacks"
         />
         <p className="text-xs text-slate-500 dark:text-slate-400">
-          Comma separated. Matched as partial text against the food's category
-          tags, so{" "}
+          Add as many as you need. Each is matched as partial text against the
+          food's category tags, so{" "}
           <code className="rounded bg-white px-1 dark:bg-slate-900">
             fruits
           </code>{" "}
           matches{" "}
           <code className="rounded bg-white px-1 dark:bg-slate-900">
             en:fruits
+          </code>{" "}
+          and{" "}
+          <code className="rounded bg-white px-1 dark:bg-slate-900">
+            en:dried-fruits
           </code>
-          .
+          . The suggestions are the 18 tags foods found by name search carry.
+          Anything else you type only matches barcode-scanned foods.
         </p>
       </div>
       {RemoveButton}

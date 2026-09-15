@@ -1,5 +1,6 @@
 import { useRef, useState, type FormEvent, type KeyboardEvent, type ClipboardEvent } from "react";
 import { useAuth } from "../lib/auth";
+import { takeIdleSignOutNote } from "../lib/idle";
 import { CenterPage, Logo } from "../components/Layout";
 import { Banner, Button, Card, Field, Input, cx } from "../components/ui";
 
@@ -94,6 +95,7 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [idleSignedOut] = useState(takeIdleSignOutNote);
 
   const submitCode = async (value: string) => {
     if (value.trim().length !== CODE_LENGTH || busy) return;
@@ -129,6 +131,12 @@ export default function Login() {
             Traffic-light food logging
           </p>
         </div>
+
+        {idleSignedOut && (
+          <Banner tone="info" className="mb-3">
+            You were signed out after 10 minutes without activity. Sign in again to carry on.
+          </Banner>
+        )}
 
         <Card className="p-5">
           {/* Two genuinely different doors, so make the choice explicit. */}

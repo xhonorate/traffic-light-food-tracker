@@ -7,6 +7,7 @@ import {
 } from "firebase/auth";
 import { httpsCallable } from "firebase/functions";
 import { auth, functions, isConfigured } from "./firebase";
+import { isIdleExpired, markActive, noteIdleSignOut } from "./idle";
 import type { Role } from "./types";
 
 /** Claims minted by Cloud Functions and carried on the ID token. */
@@ -94,6 +95,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setState({ user: null, claims: null, loading: false, impersonating: false, error: null });
         return;
       }
+      // A session Firebase restored after the page was closed, or a phone was
+      // asleep, past the inactivity limit. End it before anything renders;
+      // the resulting null user lands on the sign-in screen. Fresh sign-ins
+      // never trip this because signing in marks activity first.
+      if (isIdleExpired()) {
+        noteIdleSignOut();
+        sessionStorage.removeItem("activeMember");
+        await fbSignOut(auth);
+        return;
+      }
       const token = await user.getIdTokenResult();
       const claims = readClaims(token);
       setState({
@@ -116,6 +127,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const wrap = useCallback(async (fn: () => Promise<unknown>) => {
     setState((s) => ({ ...s, error: null }));
+    // Start the inactivity clock before the new session arrives, so a stale
+    // timestamp from an earlier session cannot sign it straight back out.
+    markActive();
     try {
       await fn();
     } catch (e) {

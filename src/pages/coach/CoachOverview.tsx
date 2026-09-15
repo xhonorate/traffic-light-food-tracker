@@ -157,7 +157,7 @@ export default function CoachOverview() {
       let famMetAll = 0;
 
       for (const m of MEMBERS) {
-        const goals = resolveGoals(f.members?.[m]);
+        const goals = resolveGoals(f.members?.[m], m);
         const mine = rows.filter((r) => r.memberId === m);
 
         const evaluated = evaluateDays(allDays, mine, goals);

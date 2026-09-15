@@ -19,9 +19,11 @@ import {
 import { n0, formatServings, pluralize } from "../../lib/format";
 import {
   DEFAULT_APP_CONFIG,
+  MEALS,
   resolveGoals,
   type AppConfig,
   type LogEntry,
+  type Meal,
   type QuickFood,
 } from "../../lib/types";
 import { Layout } from "../../components/Layout";
@@ -33,6 +35,7 @@ import {
   EmptyState,
   Skeleton,
   Toast,
+  cx,
 } from "../../components/ui";
 import {
   ColorMark,
@@ -45,6 +48,7 @@ import AddFoodSheet, {
   type AddFoodPayload,
 } from "../../components/AddFoodSheet";
 import WeekStrip from "../../components/WeekStrip";
+import { MEAL_STYLE } from "../../components/meals";
 import { Squares2X2Icon } from "@heroicons/react/24/outline";
 
 export default function Logger() {
@@ -54,7 +58,8 @@ export default function Logger() {
   const [entries, setEntries] = useState<LogEntry[] | null>(null);
   const [quickFoods, setQuickFoods] = useState<QuickFood[]>([]);
   const [config, setConfig] = useState<AppConfig>(DEFAULT_APP_CONFIG);
-  const [sheetOpen, setSheetOpen] = useState(false);
+  // Which meal button opened the add-food sheet; null while it is closed.
+  const [addingTo, setAddingTo] = useState<Meal | null>(null);
   const [toast, setToast] = useState<{
     msg: string;
     tone: "success" | "info";
@@ -87,6 +92,20 @@ export default function Logger() {
     [entries, date],
   );
 
+  // The day's log grouped by meal, in meal order. Entries logged before meals
+  // existed have none and collect under "Other" at the end.
+  const mealGroups = useMemo(() => {
+    const groups: { key: string; label: string; entries: LogEntry[] }[] = [
+      ...MEALS.map((m) => ({ key: m.value, label: m.label, entries: [] as LogEntry[] })),
+      { key: "other", label: "Other", entries: [] },
+    ];
+    for (const e of dayEntries) {
+      const g = groups.find((x) => x.key === e.meal) ?? groups[groups.length - 1];
+      g.entries.push(e);
+    }
+    return groups.filter((g) => g.entries.length > 0);
+  }, [dayEntries]);
+
   const dayTotals = useMemo(() => {
     const t = { kcal: null as number | null, green: 0, yellow: 0, red: 0 };
     for (const e of dayEntries) {
@@ -98,7 +117,7 @@ export default function Logger() {
   }, [dayEntries]);
 
   const goals = useMemo(
-    () => resolveGoals(family.members[member]),
+    () => resolveGoals(family.members[member], member),
     [family.members, member],
   );
 
@@ -110,6 +129,7 @@ export default function Logger() {
     await addEntry(family.id, {
       memberId: member,
       date,
+      meal: p.meal,
       createdAt: Date.now(),
       name: p.facts.name,
       brand: p.facts.brand,
@@ -222,25 +242,42 @@ export default function Logger() {
         ))}
       </div>
 
-      <Button
-        variant="primary"
-        size="lg"
-        full
-        className="mb-4"
-        onClick={() => setSheetOpen(true)}
-        disabled={isFuture(date)}
+      {/* One add button per meal, in the space the single button used. Four
+          across fits a phone once the label sits under the icon; only very
+          narrow screens (under 360px) fall back to two rows. */}
+      <div
+        role="group"
+        aria-label="Add a food"
+        className="mb-4 grid grid-cols-2 gap-2 min-[360px]:grid-cols-4"
       >
-        <svg
-          viewBox="0 0 20 20"
-          className="size-5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M10 4.5v11M4.5 10h11" strokeLinecap="round" />
-        </svg>
-        Add a food
-      </Button>
+        {MEALS.map((m) => (
+          <button
+            key={m.value}
+            onClick={() => setAddingTo(m.value)}
+            disabled={isFuture(date)}
+            aria-label={`Add a food to ${m.label.toLowerCase()}`}
+            className={cx(
+              "tap flex h-14 min-w-0 flex-col items-center justify-center gap-0.5 rounded-xl px-1 shadow-sm transition",
+              "hover:brightness-105 active:brightness-95 disabled:cursor-not-allowed disabled:opacity-50",
+              MEAL_STYLE[m.value].fill,
+            )}
+          >
+            <svg
+              viewBox="0 0 20 20"
+              className="size-4 shrink-0"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.2"
+              aria-hidden="true"
+            >
+              <path d="M10 4.5v11M4.5 10h11" strokeLinecap="round" />
+            </svg>
+            <span className="max-w-full truncate text-[13px] leading-tight font-semibold sm:text-sm">
+              {m.label}
+            </span>
+          </button>
+        ))}
+      </div>
 
       {/* Day log */}
       <Card className="mb-4">
@@ -268,19 +305,50 @@ export default function Logger() {
             }
           />
         ) : (
-          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-            {dayEntries.map((e) => (
-              <EntryRow
-                key={e.id}
-                entry={e}
-                onDelete={() =>
-                  deleteEntry(family.id, e.id).catch((err) =>
-                    setError(err.message),
-                  )
-                }
-              />
-            ))}
-          </ul>
+          <div className="divide-y divide-slate-200 dark:divide-slate-800">
+            {mealGroups.map((g) => {
+              const kcal = g.entries.reduce<number | null>(
+                (sum, e) => (e.kcal === null ? sum : (sum ?? 0) + e.kcal),
+                null,
+              );
+              return (
+                <section key={g.key} aria-label={g.label}>
+                  <h3 className="flex items-center justify-between gap-2 bg-slate-50 px-3 py-1.5 text-xs font-semibold tracking-wide text-slate-600 uppercase dark:bg-slate-800/60 dark:text-slate-300">
+                    <span className="flex items-center gap-2">
+                      <span
+                        aria-hidden="true"
+                        className={cx(
+                          "size-2.5 rounded-full",
+                          g.key in MEAL_STYLE
+                            ? MEAL_STYLE[g.key as Meal].dot
+                            : "bg-slate-300 dark:bg-slate-600",
+                        )}
+                      />
+                      {g.label}
+                    </span>
+                    {kcal !== null && (
+                      <span className="font-normal tracking-normal normal-case tabular-nums text-slate-500 dark:text-slate-400">
+                        {n0(kcal)} kcal
+                      </span>
+                    )}
+                  </h3>
+                  <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {g.entries.map((e) => (
+                      <EntryRow
+                        key={e.id}
+                        entry={e}
+                        onDelete={() =>
+                          deleteEntry(family.id, e.id).catch((err) =>
+                            setError(err.message),
+                          )
+                        }
+                      />
+                    ))}
+                  </ul>
+                </section>
+              );
+            })}
+          </div>
         )}
       </Card>
 
@@ -296,8 +364,9 @@ export default function Logger() {
       </Card>
 
       <AddFoodSheet
-        open={sheetOpen}
-        onClose={() => setSheetOpen(false)}
+        open={addingTo !== null}
+        meal={addingTo ?? "breakfast"}
+        onClose={() => setAddingTo(null)}
         rules={rules}
         quickFoods={quickFoods}
         foodGuideUrl={config.foodGuideUrl}

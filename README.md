@@ -111,7 +111,12 @@ Three condition kinds cover everything the protocol needed:
   pass anyway. This distinction matters: unknown added sugar is not zero
   added sugar.
 - **category** — match Open Food Facts style tags as substrings, so `fruits`
-  matches `en:fruits`.
+  matches `en:fruits`. The editor suggests only the 18 tags USDA name-search
+  results are mapped to (kept in step with the server by
+  `npm run test:categories`). Any other tag can still be typed, but only
+  matches barcode scans, which carry Open Food Facts' ~9,000 categories. That
+  list is kept in `src/lib/offCategories.ts` so the check can flag rule tags
+  nothing would match; refresh it with `npm run categories:build`.
 - **missing** — "the per-100g figure is unknown", which is how the per-serving
   fallback rules are expressed.
 
@@ -153,7 +158,7 @@ families/{familyId}
   ├── code, coachId, label, active, lastActiveAt
   ├── members.parent  { name, goals }
   ├── members.child   { name, goals }
-  ├── entries/{id}                        one logged food
+  ├── entries/{id}                        one logged food, with its meal
   └── quickFoods/{id}                     frequently used foods
 ```
 
@@ -165,11 +170,22 @@ seven bars in the graph, per the spec.
 A coach sets three targets per person — separately for the parent and the
 child:
 
-| Goal              | Direction              |
-| ----------------- | ---------------------- |
-| Green foods a day | **at least** this many |
-| Red foods a day   | **at most** this many  |
-| Calories a day    | **at most** this many  |
+| Goal              | Direction                      |
+| ----------------- | ------------------------------ |
+| Green foods a day | **at least** this many         |
+| Red foods a day   | **at most** this many          |
+| Calories a day    | **within 150** of the target   |
+
+Calories are a band, not a ceiling: too few misses the goal just as too many
+does, and a miss either side is red, never amber.
+
+|        | Calorie target                  | Green band  |
+| ------ | ------------------------------- | ----------- |
+| Parent | 1650 by default, coach-editable | target ±150 |
+| Child  | 1350, **fixed by the program**  | 1200–1500   |
+
+The child's figure is enforced in `resolveGoals()`, so whatever an older family
+record stores is ignored, and the coach's calorie box is disabled for the child.
 
 The family dashboard and the coach's family view both show, per goal, how many
 of the last 7 days it was met, with a seven-cell strip showing _which_ days.
@@ -177,12 +193,12 @@ of the last 7 days it was met, with a seven-cell strip showing _which_ days.
 Two rules are worth knowing, both enforced in [src/lib/goals.ts](src/lib/goals.ts)
 and pinned by `npm run test:goals`:
 
-- **A day with nothing logged never counts as met.** Two of the three goals are
-  ceilings, so an empty day would satisfy them automatically — which would
-  score not using the app above using it honestly. Unlogged days render as a
-  dash, not a cross.
+- **A day with nothing logged never counts as met.** The red goal is a
+  ceiling, so an empty day would satisfy it automatically — which would score
+  not using the app above using it honestly. Unlogged days render as a dash,
+  not a cross.
 - **A day whose foods have unknown calories fails the calorie goal**, rather
-  than passing a ceiling it was never measured against.
+  than passing a band it was never measured against.
 
 Goals replaced the original weekly red-food budget. Families created before
 the change are read through `resolveGoals()`, which spreads their old weekly
@@ -211,6 +227,11 @@ client-writable document, so a client cannot promote itself.
   browser bundle would be scraped and its quota burned.
 - `claimFirstAdmin` refuses once any admin exists, so the bootstrap cannot be
   replayed to escalate.
+- **Every role is signed out after 10 minutes without interaction**, with a
+  one-minute warning first. The last-activity time is kept in localStorage, so
+  a session Firebase restores after the page was closed is ended too, and
+  activity in one tab keeps the others alive. See
+  [src/lib/idle.ts](src/lib/idle.ts).
 
 Note that a six-character code is a deliberate trade-off: low friction for
 children, ~887 million combinations, no password to lose. It suits a small
@@ -320,6 +341,19 @@ phrase, so the exact product is in the candidate pool even when USDA's scoring
 would bury it past the page limit; the loose word search runs only if that
 returns less than a full page, or for a single-word query.
 
+### Barcode scanning
+
+The scanner offers three routes, all equal on screen: a live camera scan that
+reads on its own, **Take a photo** (the phone's own camera app, which focuses
+close up far better than a browser preview — the dependable route on iPhones),
+and typing the number.
+
+Decoding uses the browser's built-in `BarcodeDetector` where it can read
+EAN-13 (Android Chrome), and zxing-cpp compiled to WebAssembly everywhere else.
+The WASM file is served from this site, not a CDN. Only EAN/UPC are read.
+`npm run test:barcode` renders real EAN/UPC symbols into noisy, soft-focus,
+tilted 1280×720 frames and checks the WASM decoder reads each one.
+
 ### Programmatic export
 
 For a scheduled feed into another system rather than a manual download, add a
@@ -357,44 +391,15 @@ firestore.rules       access control
 npm run dev              # dev server
 npm run build            # typecheck + production build
 npm run typecheck        # types only
-npm test                 # the three suites below
+npm test                 # the five suites below
 npm run test:rules       # rule-engine parity against the prototype
 npm run test:goals       # daily-goal evaluation semantics
 npm run test:rank        # USDA search-result ranking
+npm run test:categories  # rule-editor category suggestions
+npm run test:barcode     # barcode decoding from camera-like frames
+npm run categories:build # refresh the Open Food Facts category list
 npm run deploy           # build and deploy everything
 npm run deploy:hosting   # site only
 npm run deploy:rules     # Firestore rules and indexes only
 npm run deploy:functions # Cloud Functions only
 ```
-
----
-
-## Known gaps
-
-Honest list of what is not done.
-
-- **The app has not been driven through a browser end to end.** The backend is
-  deployed and smoke-tested over HTTP, but no one has yet signed in, created a
-  family, or logged a food through the UI. Claim the admin account
-  ([SETUP.md](SETUP.md)) and walk one family through a log before trusting it
-  with real participants.
-- **Firestore rules are compile-verified, not behaviour-tested.** Firebase
-  compiled `firestore.rules` successfully, so the syntax and schema are valid.
-  What is _not_ proven is that they permit and deny exactly the right things —
-  that needs `@firebase/rules-unit-testing` against the emulator, which requires
-  JDK 21+ (this machine has 17).
-- **Admin statistics fan out client-side.** Fine at tens of families; if the
-  program grows past a few hundred, precompute daily rollups instead.
-- **Quest integration** is the CSV plus the notes above, not a live API — the
-  target system's interface was not specified.
-
-### What is verified
-
-- Rule engine matches the prototype on **31/31** foods (`npm run test:rules`).
-- Whole codebase typechecks and builds.
-- Firestore rules **compile** and are released.
-- All **12 Cloud Functions** deployed; over HTTP, `redeemFamilyCode` rejects
-  unknown and malformed codes with an identical response (no enumeration leak),
-  and `searchFoods` rejects unauthenticated callers.
-- The USDA key returns live data.
-- The deployed site serves correctly.

@@ -18,9 +18,17 @@ import {
   type FoodSearchResult,
 } from "../lib/foodApi";
 import { n0, n1, formatServings } from "../lib/format";
-import type { FoodFacts, QuickFood, RuleSet, TrafficColor } from "../lib/types";
+import {
+  MEALS,
+  type FoodFacts,
+  type Meal,
+  type QuickFood,
+  type RuleSet,
+  type TrafficColor,
+} from "../lib/types";
 import { Banner, Button, Field, Input, Modal, Spinner, cx } from "./ui";
 import { ColorMark, ColorPicker, ColorWordHelp } from "./TrafficLight";
+import { MEAL_STYLE } from "./meals";
 // The barcode decoding library is a few hundred KB and most sessions never
 // scan, so it is fetched only when the camera is actually opened.
 const BarcodeScanner = lazy(() => import("./BarcodeScanner"));
@@ -35,14 +43,23 @@ export interface AddFoodPayload {
    *  chip was reused. */
   original: FoodFacts;
   servings: number;
+  meal: Meal;
   color: TrafficColor;
   autoColor: TrafficColor;
   reasons: string[];
   overridden: boolean;
 }
 
+const FIND_TITLE: Record<Meal, string> = {
+  breakfast: "Add to breakfast",
+  lunch: "Add to lunch",
+  dinner: "Add to dinner",
+  snack: "Add a snack",
+};
+
 export default function AddFoodSheet({
   open,
+  meal: initialMeal,
   onClose,
   rules,
   quickFoods,
@@ -50,6 +67,9 @@ export default function AddFoodSheet({
   onAdd,
 }: {
   open: boolean;
+  /** The meal button that opened the sheet. The family can still change it
+   *  on the portion step if they tapped the wrong one. */
+  meal: Meal;
   onClose: () => void;
   rules: RuleSet;
   quickFoods: QuickFood[];
@@ -57,6 +77,7 @@ export default function AddFoodSheet({
   onAdd: (payload: AddFoodPayload) => Promise<void>;
 }) {
   const [step, setStep] = useState<Step>("find");
+  const [meal, setMeal] = useState<Meal>(initialMeal);
   const [facts, setFacts] = useState<FoodFacts | null>(null);
   const [servings, setServings] = useState(1);
   const [guess, setGuess] = useState<TrafficColor | null>(null);
@@ -66,6 +87,7 @@ export default function AddFoodSheet({
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [resolving, setResolving] = useState(false);
+  const [lookingUp, setLookingUp] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const reset = useCallback(() => {
@@ -77,11 +99,14 @@ export default function AddFoodSheet({
     setSaving(false);
     setError(null);
     setResolving(false);
+    setLookingUp(null);
   }, []);
 
   useEffect(() => {
-    if (open) reset();
-  }, [open, reset]);
+    if (!open) return;
+    reset();
+    setMeal(initialMeal);
+  }, [open, initialMeal, reset]);
 
   /**
    * Move to the portion step. Foods that arrived on a bare 100g basis get a
@@ -130,6 +155,7 @@ export default function AddFoodSheet({
         facts: scaled,
         original: facts,
         servings,
+        meal,
         color: finalColor,
         autoColor: verdict.color,
         reasons: verdict.reasons,
@@ -145,7 +171,7 @@ export default function AddFoodSheet({
   };
 
   const titles: Record<Step, string> = {
-    find: "Add a food",
+    find: FIND_TITLE[meal],
     scan: "Scan a barcode",
     custom: "Enter a food yourself",
     detail: "How much, and what color?",
@@ -156,6 +182,17 @@ export default function AddFoodSheet({
       {error && (
         <Banner tone="error" className="mb-3">
           {error}
+        </Banner>
+      )}
+
+      {/* The lookup takes a second or two; without this the sheet appears to
+          have ignored the scan. */}
+      {step === "find" && lookingUp && (
+        <Banner tone="info" className="mb-3">
+          <span className="flex items-center gap-2">
+            <Spinner className="size-4 shrink-0" />
+            Found barcode {lookingUp}. Looking it up…
+          </span>
         </Banner>
       )}
 
@@ -180,6 +217,8 @@ export default function AddFoodSheet({
             onCancel={() => setStep("find")}
             onDetected={async (code) => {
               setStep("find");
+              setError(null);
+              setLookingUp(code);
               try {
                 const hit = await lookupBarcode(code);
                 if (hit) void choose(hit.facts, hit.key);
@@ -189,6 +228,8 @@ export default function AddFoodSheet({
                   );
               } catch (e) {
                 setError((e as Error).message);
+              } finally {
+                setLookingUp(null);
               }
             }}
           />
@@ -207,7 +248,14 @@ export default function AddFoodSheet({
           resolving={resolving}
           facts={facts}
           servings={servings}
-          setServings={setServings}
+          setServings={(n) => {
+            setServings(n);
+            // A changed portion is a new answer, so the "Are you sure?"
+            // prompt clears exactly as it does when the color changes.
+            setChallenge(null);
+          }}
+          meal={meal}
+          setMeal={setMeal}
           guess={guess}
           setGuess={(c) => {
             setGuess(c);
@@ -527,6 +575,8 @@ function DetailStep({
   facts,
   servings,
   setServings,
+  meal,
+  setMeal,
   guess,
   setGuess,
   challenge,
@@ -539,6 +589,8 @@ function DetailStep({
   facts: FoodFacts;
   servings: number;
   setServings: (n: number) => void;
+  meal: Meal;
+  setMeal: (m: Meal) => void;
   guess: TrafficColor | null;
   setGuess: (c: TrafficColor) => void;
   challenge: { auto: TrafficColor; reasons: string[] } | null;
@@ -586,6 +638,36 @@ function DetailStep({
             </div>
           ))}
         </dl>
+      </div>
+
+      <div>
+        <span className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">
+          Meal
+        </span>
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+          {MEALS.map((m) => (
+            <button
+              key={m.value}
+              onClick={() => setMeal(m.value)}
+              aria-pressed={meal === m.value}
+              className={cx(
+                "tap flex min-w-0 items-center justify-center gap-1.5 rounded-lg border px-1 py-2 text-sm font-medium transition",
+                meal === m.value
+                  ? cx("border-transparent font-semibold shadow-sm", MEAL_STYLE[m.value].fill)
+                  : "border-slate-300 bg-white text-slate-700 hover:border-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200",
+              )}
+            >
+              {meal === m.value ? (
+                <svg viewBox="0 0 20 20" className="size-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.6" aria-hidden="true">
+                  <path d="m4.5 10.5 3.5 3.5 7.5-8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <span aria-hidden="true" className={cx("size-2 shrink-0 rounded-full", MEAL_STYLE[m.value].dot)} />
+              )}
+              <span className="truncate">{m.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div>

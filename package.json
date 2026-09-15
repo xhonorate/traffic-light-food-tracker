@@ -16,16 +16,19 @@
     "test:rules": "esbuild scripts/rule-parity.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/rule-parity.mjs --log-level=error && node node_modules/.cache/rule-parity.mjs",
     "test:goals": "esbuild scripts/goals-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/goals-check.mjs --log-level=error && node node_modules/.cache/goals-check.mjs",
     "test:rank": "esbuild scripts/food-rank.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/food-rank.mjs --log-level=error && node node_modules/.cache/food-rank.mjs",
-    "test": "npm run test:rules && npm run test:goals && npm run test:rank",
+    "test:categories": "esbuild scripts/categories-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/categories-check.mjs --log-level=error && node node_modules/.cache/categories-check.mjs",
+    "test:barcode": "esbuild scripts/barcode-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/barcode-check.mjs --log-level=error && node node_modules/.cache/barcode-check.mjs",
+    "test": "npm run test:rules && npm run test:goals && npm run test:rank && npm run test:categories && npm run test:barcode",
+    "categories:build": "esbuild scripts/build-categories.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/build-categories.mjs --log-level=error && node node_modules/.cache/build-categories.mjs",
     "test:usda": "esbuild scripts/usda-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/usda-check.mjs --log-level=error && node node_modules/.cache/usda-check.mjs"
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",
     "firebase": "^12.18.0",
-    "html5-qrcode": "^2.3.8",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.18.0"
+    "react-router-dom": "^7.18.0",
+    "zxing-wasm": "^3.1.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",

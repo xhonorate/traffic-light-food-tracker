@@ -206,7 +206,8 @@ export default function GoalsPanel({
 
       <p className="mt-2 text-[11px] leading-snug text-slate-400 dark:text-slate-500">
         A day with nothing logged does not count as met — an empty day would
-        otherwise pass both &ldquo;at most&rdquo; goals automatically.
+        otherwise pass the &ldquo;at most&rdquo; red goal automatically.
+        Calories count as met only inside the range; too few misses it too.
       </p>
     </section>
   );

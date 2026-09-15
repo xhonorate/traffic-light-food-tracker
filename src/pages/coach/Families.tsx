@@ -10,8 +10,11 @@ import {
 } from "../../lib/data";
 import { formatDateTime } from "../../lib/dates";
 import { initials } from "../../lib/format";
+import { formatKcalRange } from "../../lib/goals";
 import {
-  DEFAULT_GOALS,
+  CHILD_KCAL_TARGET,
+  KCAL_BAND,
+  defaultGoalsFor,
   resolveGoals,
   type FamilyDoc,
   type MemberGoals,
@@ -171,7 +174,7 @@ export default function Families() {
 
                   <ul className="mt-3 space-y-2">
                     {(["parent", "child"] as const).map((m) => {
-                      const g = resolveGoals(f.members[m]);
+                      const g = resolveGoals(f.members[m], m);
                       return (
                         <li key={m} className="flex items-center gap-2 text-sm">
                           <span
@@ -322,7 +325,7 @@ function GoalSummaryChips({ goals }: { goals: MemberGoals }) {
         <FireIcon className="size-3" style={{ color: "var(--tl-yellow)" }} />
       ),
       value: goals.dailyKcal,
-      title: `At most ${goals.dailyKcal} calories a day`,
+      title: `${formatKcalRange(goals)} calories a day`,
     },
   ];
   return (
@@ -345,7 +348,7 @@ function GoalSummaryChips({ goals }: { goals: MemberGoals }) {
 const GOAL_FIELDS = [
   { key: "dailyGreen" as const, label: "Green", hint: "at least" },
   { key: "dailyRed" as const, label: "Red", hint: "at most" },
-  { key: "dailyKcal" as const, label: "Calories", hint: "at most" },
+  { key: "dailyKcal" as const, label: "Calories", hint: `target ±${KCAL_BAND}` },
 ];
 
 interface FamilyFormValues {
@@ -384,10 +387,10 @@ function FamilyFormModal({
     dailyKcal: String(g.dailyKcal),
   });
   const [parentGoals, setParentGoals] = useState(
-    asDraft(initial ? resolveGoals(initial.members.parent) : DEFAULT_GOALS),
+    asDraft(initial ? resolveGoals(initial.members.parent, "parent") : defaultGoalsFor("parent")),
   );
   const [childGoals, setChildGoals] = useState(
-    asDraft(initial ? resolveGoals(initial.members.child) : DEFAULT_GOALS),
+    asDraft(initial ? resolveGoals(initial.members.child, "child") : defaultGoalsFor("child")),
   );
 
   const toGoals = (d: Record<string, string>): MemberGoals => ({
@@ -395,6 +398,10 @@ function FamilyFormModal({
     dailyRed: Math.max(0, Number(d.dailyRed) || 0),
     dailyKcal: Math.max(0, Number(d.dailyKcal) || 0),
   });
+
+  /** Live "1,500–1,800" under the calorie box, so the band is never a guess. */
+  const kcalHint = (d: Record<string, string>) =>
+    `green ${formatKcalRange(toGoals(d))}`;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -492,19 +499,39 @@ function FamilyFormModal({
               Daily goals
             </p>
             <div className="grid grid-cols-3 gap-2">
-              {GOAL_FIELDS.map((g) => (
-                <Field key={g.key} label={g.label} hint={g.hint}>
-                  <Input
-                    type="number"
-                    min="0"
-                    inputMode="numeric"
-                    value={m.goals[g.key]}
-                    onChange={(e) =>
-                      m.setGoals({ ...m.goals, [g.key]: e.target.value })
+              {GOAL_FIELDS.map((g) => {
+                // The child's calorie target is fixed by the program.
+                const locked = g.key === "dailyKcal" && m.key === "child";
+                return (
+                  <Field
+                    key={g.key}
+                    label={g.label}
+                    hint={
+                      g.key === "dailyKcal"
+                        ? locked
+                          ? `fixed · ${kcalHint(m.goals)}`
+                          : kcalHint(m.goals)
+                        : g.hint
                     }
-                  />
-                </Field>
-              ))}
+                  >
+                    <Input
+                      type="number"
+                      min="0"
+                      inputMode="numeric"
+                      value={locked ? String(CHILD_KCAL_TARGET) : m.goals[g.key]}
+                      disabled={locked}
+                      title={
+                        locked
+                          ? "The child's calorie target is set by the program"
+                          : undefined
+                      }
+                      onChange={(e) =>
+                        m.setGoals({ ...m.goals, [g.key]: e.target.value })
+                      }
+                    />
+                  </Field>
+                );
+              })}
             </div>
           </fieldset>
         ))}

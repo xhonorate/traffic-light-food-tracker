@@ -106,13 +106,21 @@ interface MemberGoals {
   dailyKcal: number;
 }
 
-/** Validate goals from an untrusted client, with the same defaults the app uses. */
-function readGoals(v: unknown, who: string): MemberGoals {
+/** Must match DEFAULT_GOALS / CHILD_KCAL_TARGET in src/lib/types.ts. */
+const PARENT_KCAL_DEFAULT = 1650;
+const CHILD_KCAL_TARGET = 1350;
+
+/** Validate goals from an untrusted client, with the same defaults the app
+ *  uses. The child's calorie target is fixed by the program, so whatever the
+ *  client sent for it is ignored. */
+function readGoals(v: unknown, who: "Parent" | "Child"): MemberGoals {
   const g = (v ?? {}) as Record<string, unknown>;
   return {
     dailyRed: nonNegInt(g.dailyRed ?? 2, `${who} daily red food budget`, 100),
     dailyGreen: nonNegInt(g.dailyGreen ?? 5, `${who} daily green food goal`, 100),
-    dailyKcal: nonNegInt(g.dailyKcal ?? 2000, `${who} daily calorie budget`, 20000),
+    dailyKcal: who === "Child"
+      ? CHILD_KCAL_TARGET
+      : nonNegInt(g.dailyKcal ?? PARENT_KCAL_DEFAULT, `${who} daily calorie target`, 20000),
   };
 }
 
@@ -739,7 +747,10 @@ export const lookupBarcode = onCall({ secrets: [USDA_API_KEY] }, async (req) => 
 
   const key = usdaKey();
   const padded = code.padStart(12, "0");
-  for (const gtin of new Set([code, padded])) {
+  // USDA stores US products as 12-digit UPC-A, but a scanner may report the
+  // same code in its 13-digit EAN form with a leading zero.
+  const upcA = code.length === 13 && code.startsWith("0") ? code.slice(1) : code;
+  for (const gtin of new Set([code, padded, upcA])) {
     // eslint-disable-next-line no-await-in-loop
     const data = await usdaSearch(key, {
       query: `gtinUpc:${gtin}`,

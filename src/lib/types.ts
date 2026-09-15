@@ -151,24 +151,39 @@ export interface UserDoc {
 }
 
 /**
- * The three daily targets a coach sets per person. Two are ceilings, one is a
- * floor -- kept explicit in the field docs because "goal" alone is ambiguous
- * and the direction decides whether a day counts as met.
+ * The three daily targets a coach sets per person. One is a ceiling, one a
+ * floor and one a band -- kept explicit in the field docs because "goal" alone
+ * is ambiguous and the direction decides whether a day counts as met.
  */
 export interface MemberGoals {
   /** Ceiling: at most this many red foods in a day. */
   dailyRed: number;
   /** Floor: at least this many green foods in a day. */
   dailyGreen: number;
-  /** Ceiling: at most this many calories in a day. */
+  /** Band centre: the day is met within `KCAL_BAND` calories either side.
+   *  Eating too little misses the goal just as eating too much does. */
   dailyKcal: number;
 }
+
+/** Half-width of the calorie band: a 1650 target is met from 1500 to 1800. */
+export const KCAL_BAND = 150;
+
+/** The child's calorie target is fixed by the program, not set by coaches:
+ *  1200-1500 a day. Anything stored on the family record is ignored. */
+export const CHILD_KCAL_TARGET = 1350;
 
 export const DEFAULT_GOALS: MemberGoals = {
   dailyRed: 2,
   dailyGreen: 5,
-  dailyKcal: 2000,
+  dailyKcal: 1650,
 };
+
+/** Starting goals for a new family member. */
+export function defaultGoalsFor(memberId: MemberId): MemberGoals {
+  return memberId === "child"
+    ? { ...DEFAULT_GOALS, dailyKcal: CHILD_KCAL_TARGET }
+    : { ...DEFAULT_GOALS };
+}
 
 export interface FamilyMember {
   name: string;
@@ -185,14 +200,37 @@ export interface FamilyMember {
  * Read a member's goals, filling gaps for records written before goals
  * existed. A legacy weekly red budget is spread across the week rather than
  * discarded, so an existing family's target carries over roughly intact.
+ *
+ * The child's calorie target is always `CHILD_KCAL_TARGET`, whatever the
+ * record says, so families saved before it was fixed pick it up too.
  */
-export function resolveGoals(member: FamilyMember | undefined): MemberGoals {
-  if (member?.goals) return { ...DEFAULT_GOALS, ...member.goals };
-  const legacyDailyRed = typeof member?.redBudget === "number"
-    ? Math.max(1, Math.round(member.redBudget / 7))
-    : DEFAULT_GOALS.dailyRed;
-  return { ...DEFAULT_GOALS, dailyRed: legacyDailyRed };
+export function resolveGoals(member: FamilyMember | undefined, memberId: MemberId): MemberGoals {
+  const defaults = defaultGoalsFor(memberId);
+  let goals: MemberGoals;
+  if (member?.goals) {
+    goals = { ...defaults, ...member.goals };
+  } else {
+    const legacyDailyRed = typeof member?.redBudget === "number"
+      ? Math.max(1, Math.round(member.redBudget / 7))
+      : defaults.dailyRed;
+    goals = { ...defaults, dailyRed: legacyDailyRed };
+  }
+  if (memberId === "child") goals.dailyKcal = CHILD_KCAL_TARGET;
+  return goals;
 }
+
+export type Meal = "breakfast" | "lunch" | "dinner" | "snack";
+
+export const MEALS: { value: Meal; label: string }[] = [
+  { value: "breakfast", label: "Breakfast" },
+  { value: "lunch", label: "Lunch" },
+  { value: "dinner", label: "Dinner" },
+  { value: "snack", label: "Snack" },
+];
+
+export const MEAL_LABEL: Record<Meal, string> = {
+  breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snack: "Snack",
+};
 
 export interface FamilyDoc {
   id: string;
@@ -212,6 +250,9 @@ export interface LogEntry {
   memberId: MemberId;
   /** Local calendar day, `YYYY-MM-DD`. */
   date: string;
+  /** Which meal it was logged under. Absent on entries logged before meals
+   *  existed. */
+  meal?: Meal;
   createdAt: number;
   name: string;
   brand: string;

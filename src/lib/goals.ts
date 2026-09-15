@@ -1,14 +1,14 @@
-import type { LogEntry, MemberGoals } from "./types";
+import { KCAL_BAND, type LogEntry, type MemberGoals } from "./types";
 
 /**
  * Goal evaluation.
  *
  * A deliberate decision runs through this file: **a day with nothing logged
- * counts as not met, for every goal.** Two of the three targets are ceilings
- * ("at most 2 red", "at most 2000 kcal"), and an empty day trivially satisfies
- * both — so counting blank days as successes would score not using the app
- * higher than using it honestly. Unlogged days are reported separately as
- * `logged: false` so the UI can show them as "no data" rather than failure.
+ * counts as not met, for every goal.** The red target is a ceiling ("at most
+ * 2 red"), and an empty day trivially satisfies it -- so counting blank days
+ * as successes would score not using the app higher than using it honestly.
+ * Unlogged days are reported separately as `logged: false` so the UI can show
+ * them as "no data" rather than failure.
  */
 
 export type GoalKey = "red" | "green" | "kcal";
@@ -34,6 +34,20 @@ export interface GoalSummary {
   days: DayGoalResult[];
 }
 
+/** The calorie band that counts as met, inclusive at both ends. */
+export function kcalRange(goals: MemberGoals): { min: number; max: number } {
+  return {
+    min: Math.max(0, goals.dailyKcal - KCAL_BAND),
+    max: goals.dailyKcal + KCAL_BAND,
+  };
+}
+
+/** "1,500–1,800", for labels. */
+export function formatKcalRange(goals: MemberGoals): string {
+  const { min, max } = kcalRange(goals);
+  return `${min.toLocaleString("en-US")}–${max.toLocaleString("en-US")}`;
+}
+
 /** Per-day totals and per-goal outcomes across a window of dates. */
 export function evaluateDays(
   days: string[],
@@ -56,13 +70,14 @@ export function evaluateDays(
     if (e.kcal !== null && e.kcal !== undefined) row.kcal = (row.kcal ?? 0) + e.kcal;
   }
 
+  const { min, max } = kcalRange(goals);
   for (const row of byDate.values()) {
     if (!row.logged) continue;
     row.met.red = row.red <= goals.dailyRed;
     row.met.green = row.green >= goals.dailyGreen;
     // Calories are only judged when some were actually recorded; a day of
-    // foods with unknown energy should not silently pass a calorie ceiling.
-    row.met.kcal = row.kcal !== null && row.kcal <= goals.dailyKcal;
+    // foods with unknown energy should not silently pass.
+    row.met.kcal = row.kcal !== null && row.kcal >= min && row.kcal <= max;
   }
 
   return days.map((d) => byDate.get(d)!);
@@ -77,7 +92,7 @@ export function summariseGoals(
   const spec: { key: GoalKey; label: string; target: string }[] = [
     { key: "green", label: "Green foods", target: `${goals.dailyGreen} or more a day` },
     { key: "red", label: "Red foods", target: `${goals.dailyRed} or fewer a day` },
-    { key: "kcal", label: "Calories", target: `${goals.dailyKcal.toLocaleString()} or fewer a day` },
+    { key: "kcal", label: "Calories", target: `${formatKcalRange(goals)} a day` },
   ];
   return spec.map((s) => ({
     ...s,
@@ -90,10 +105,13 @@ export function summariseGoals(
  * How badly a missed goal was missed.
  *
  * "near" is within 20% of the target, which reads as a slip rather than a
- * blow-out and is coloured amber; anything further is red. Calories that were
- * never recorded count as "near": the day failed for lack of evidence, not
- * because we know the ceiling was broken, and colouring that red would accuse
- * a family of something unmeasured.
+ * blow-out and is coloured amber; anything further is red.
+ *
+ * Calories have no near miss: the band already is the tolerance, so a day
+ * outside it -- too low or too high -- is simply missed. The one exception is
+ * calories that were never recorded, which count as "near": the day failed for
+ * lack of evidence, not because we know the band was broken, and colouring
+ * that red would accuse a family of something unmeasured.
  */
 export type MissDistance = "near" | "far";
 
@@ -109,12 +127,8 @@ export function missDistance(
       if (limit <= 0) return day.red === 0 ? "near" : "far";
       return day.red <= limit * (1 + NEAR_TOLERANCE) ? "near" : "far";
     }
-    case "kcal": {
-      if (day.kcal === null) return "near";
-      const limit = goals.dailyKcal;
-      if (limit <= 0) return "far";
-      return day.kcal <= limit * (1 + NEAR_TOLERANCE) ? "near" : "far";
-    }
+    case "kcal":
+      return day.kcal === null ? "near" : "far";
     case "green": {
       // Floor: how far below it did they fall?
       const target = goals.dailyGreen;

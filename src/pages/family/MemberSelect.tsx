@@ -63,7 +63,7 @@ export default function MemberSelect({
                       </span>
                       <span className="mt-0.5 block text-sm text-slate-500 dark:text-slate-400">
                         {role}
-                        {` · ${resolveGoals(m).dailyGreen} green, ${resolveGoals(m).dailyRed} red a day`}
+                        {` · ${resolveGoals(m, id).dailyGreen} green, ${resolveGoals(m, id).dailyRed} red a day`}
                       </span>
                     </span>
                     <svg viewBox="0 0 20 20" className="size-5 shrink-0 text-slate-400" fill="none"

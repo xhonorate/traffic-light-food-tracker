@@ -15,7 +15,10 @@ import {
   weekWindow,
 } from "../../lib/dates";
 import { n0, formatServings } from "../../lib/format";
+import { formatKcalRange } from "../../lib/goals";
 import {
+  KCAL_BAND,
+  MEAL_LABEL,
   resolveGoals,
   type FamilyDoc,
   type LogEntry,
@@ -115,7 +118,7 @@ export default function FamilyDetail() {
   }, [memberEntries]);
 
   const goals = useMemo(
-    () => resolveGoals(family?.members?.[member]),
+    () => resolveGoals(family?.members?.[member], member),
     [family, member],
   );
 
@@ -240,6 +243,7 @@ export default function FamilyDetail() {
           <GoalsEditor
             key={`${family.id}-${member}`}
             value={goals}
+            kcalLocked={member === "child"}
             onSave={async (g) => {
               await setMemberGoals(family.id, member, g);
               setToast("Goals updated");
@@ -314,7 +318,9 @@ export default function FamilyDetail() {
                       {e.name}
                     </p>
                     <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
-                      {formatDayLabel(e.date)} · {formatTime(e.createdAt)} ·{" "}
+                      {formatDayLabel(e.date)} ·{" "}
+                      {e.meal && <>{MEAL_LABEL[e.meal]} · </>}
+                      {formatTime(e.createdAt)} ·{" "}
                       {formatServings(e.servings)} ×{" "}
                       {e.servingLabel || "serving"}
                       {e.kcal !== null && <> · {n0(e.kcal)} kcal</>}
@@ -337,9 +343,12 @@ export default function FamilyDetail() {
 /** The three daily targets, edited together and saved as one document field. */
 function GoalsEditor({
   value,
+  kcalLocked,
   onSave,
 }: {
   value: MemberGoals;
+  /** The child's calorie target is fixed by the program. */
+  kcalLocked: boolean;
   onSave: (g: MemberGoals) => Promise<void>;
 }) {
   const [draft, setDraft] = useState({
@@ -374,8 +383,10 @@ function GoalsEditor({
     },
     {
       key: "dailyKcal" as const,
-      label: "Calories a day",
-      hint: "At most this many",
+      label: "Calorie target a day",
+      hint: kcalLocked
+        ? `Fixed for children: green from ${formatKcalRange(parsed)}`
+        : `Green from ${formatKcalRange(parsed)} (±${KCAL_BAND})`,
       unit: "kcal",
     },
   ];
@@ -383,17 +394,23 @@ function GoalsEditor({
   return (
     <div>
       <div className="grid gap-3 sm:grid-cols-3">
-        {fields.map((f) => (
-          <Field key={f.key} label={f.label} hint={f.hint}>
-            <Input
-              type="number"
-              min="0"
-              inputMode="numeric"
-              value={draft[f.key]}
-              onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
-            />
-          </Field>
-        ))}
+        {fields.map((f) => {
+          const locked = kcalLocked && f.key === "dailyKcal";
+          return (
+            <Field key={f.key} label={f.label} hint={f.hint}>
+              <Input
+                type="number"
+                min="0"
+                inputMode="numeric"
+                value={draft[f.key]}
+                disabled={locked}
+                onChange={(e) =>
+                  setDraft({ ...draft, [f.key]: e.target.value })
+                }
+              />
+            </Field>
+          );
+        })}
       </div>
       <div className="mt-3 flex gap-2">
         <Button
