@@ -4,6 +4,7 @@ import { useAuth } from "../../lib/auth";
 import {
   createCoach,
   deleteCoach,
+  setSyncId,
   subscribeFamilies,
   subscribeUsers,
   updateUser,
@@ -38,6 +39,7 @@ export default function Coaches() {
   const [families, setFamilies] = useState<FamilyDoc[]>([]);
   const [adding, setAdding] = useState(false);
   const [deleting, setDeleting] = useState<UserDoc | null>(null);
+  const [linking, setLinking] = useState<UserDoc | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -132,10 +134,19 @@ export default function Coaches() {
                       </span>
                       {u.role === "admin" && <Badge tone="brand">Admin</Badge>}
                       {u.disabled && <Badge tone="warn">Disabled</Badge>}
+                      {u.role === "coach" && !u.syncId && (
+                        <Badge tone="warn">Missing Sync ID</Badge>
+                      )}
                       {isSelf && <Badge>You</Badge>}
                     </p>
                     <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
                       {u.email}
+                      {u.syncId && (
+                        <>
+                          {" · Sync ID "}
+                          <span className="font-mono">{u.syncId}</span>
+                        </>
+                      )}
                       {u.role === "coach" &&
                         ` · ${count} ${pluralize(count, "family", "families")}`}
                       {u.lastLoginAt
@@ -163,6 +174,13 @@ export default function Coaches() {
                         Open as coach
                       </Button>
                     )}
+                    <Button
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => setLinking(u)}
+                    >
+                      {u.syncId ? "Change Sync ID" : "Set Sync ID"}
+                    </Button>
                     <Button
                       size="sm"
                       disabled={busy}
@@ -231,6 +249,14 @@ export default function Coaches() {
         />
       )}
 
+      {linking && (
+        <SyncIdModal
+          account={linking}
+          onClose={() => setLinking(null)}
+          onDone={(msg) => setToast(msg)}
+        />
+      )}
+
       <ConfirmDialog
         open={Boolean(deleting)}
         onClose={() => setDeleting(null)}
@@ -288,10 +314,15 @@ function AddCoachModal({
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"coach" | "admin">("coach");
+  const [syncId, setSyncIdValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const invalid = !name.trim() || !/^\S+@\S+\.\S+$/.test(email.trim());
+  // Coaches come from the external platform, so they always carry a Sync ID.
+  const invalid =
+    !name.trim() ||
+    !/^\S+@\S+\.\S+$/.test(email.trim()) ||
+    (role === "coach" && !syncId.trim());
 
   return (
     <Modal
@@ -312,7 +343,12 @@ function AddCoachModal({
               setError(null);
               const address = email.trim().toLowerCase();
               try {
-                await createCoach({ name: name.trim(), email: address, role });
+                await createCoach({
+                  name: name.trim(),
+                  email: address,
+                  role,
+                  syncId: syncId.trim() || undefined,
+                });
               } catch (e) {
                 setError((e as Error).message);
                 setBusy(false);
@@ -361,6 +397,25 @@ function AddCoachModal({
           />
         </Field>
 
+        <Field
+          label="Sync ID"
+          required={role === "coach"}
+          hint={
+            role === "coach"
+              ? "From the external platform. The only field used to link this person across systems."
+              : "Optional for administrators"
+          }
+        >
+          <Input
+            value={syncId}
+            onChange={(e) => setSyncIdValue(e.target.value)}
+            placeholder="e.g. 1234abcd"
+            autoComplete="off"
+            spellCheck={false}
+            className="font-mono"
+          />
+        </Field>
+
         <div>
           <span className="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">
             Role
@@ -403,6 +458,80 @@ function AddCoachModal({
           No password is set here. They receive an email with a secure link to
           create their own.
         </Banner>
+      </div>
+    </Modal>
+  );
+}
+
+/** Link an existing account to its Sync ID, or correct a mistyped one. */
+function SyncIdModal({
+  account,
+  onClose,
+  onDone,
+}: {
+  account: UserDoc;
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  const [value, setValue] = useState(account.syncId ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const next = value.trim();
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={account.syncId ? "Change Sync ID" : "Set Sync ID"}
+      footer={
+        <>
+          <Button onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            loading={busy}
+            disabled={!next || next === account.syncId}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await setSyncId({
+                  syncId: next,
+                  target: { kind: "staff", uid: account.uid },
+                });
+                onDone(`Sync ID saved for ${account.name || account.email}`);
+                onClose();
+              } catch (e) {
+                setError((e as Error).message);
+                setBusy(false);
+              }
+            }}
+          >
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error && <Banner tone="error">{error}</Banner>}
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          {account.name || account.email}
+        </p>
+        <Field
+          label="Sync ID"
+          required
+          hint="Must match the external platform exactly. Each Sync ID can belong to one person only."
+        >
+          <Input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="e.g. 1234abcd"
+            autoComplete="off"
+            spellCheck={false}
+            className="font-mono"
+          />
+        </Field>
       </div>
     </Modal>
   );

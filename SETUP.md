@@ -108,6 +108,27 @@ six-character code — give it to them and they are done. No password.
 
 ---
 
+## External API key (3C integration)
+
+The `/api` routes (see the README) reject every request until this key is set.
+Use a different key for each environment:
+
+```bash
+firebase use <qa-or-prod-project>
+printf '%s' 'THE-KEY' | firebase functions:secrets:set SYNC_API_KEY --data-file=-
+npm run deploy:functions && npm run deploy:hosting   # hosting carries the /api rewrite
+```
+
+Give 3C the same value for that environment. To rotate the key, set it again
+and redeploy the functions. For the emulators, put `SYNC_API_KEY=...` in
+`functions/.secret.local`, which is gitignored.
+
+After deploying, set a Sync ID on every existing coach and family member.
+Records without one show a **Missing Sync ID** badge and are left out of
+`GET /api/data`.
+
+---
+
 ## Local development
 
 ```bash

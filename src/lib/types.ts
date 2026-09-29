@@ -145,6 +145,10 @@ export interface UserDoc {
   email: string;
   name: string;
   role: "admin" | "coach";
+  /** Links this person to the external platform (3C). Required for coaches;
+   *  absent on accounts created before Sync IDs and optional for admins.
+   *  Changed only through the `setSyncId` function. */
+  syncId?: string;
   disabled: boolean;
   createdAt: number;
   lastLoginAt: number | null;
@@ -187,6 +191,10 @@ export function defaultGoalsFor(memberId: MemberId): MemberGoals {
 
 export interface FamilyMember {
   name: string;
+  /** Links this member to the external platform (3C) and keys the data API.
+   *  Absent on families created before Sync IDs. Changed only through the
+   *  `setSyncId` function. */
+  syncId?: string;
   /** The coach-set daily targets. Absent on families created before goals
    *  existed -- read it through `resolveGoals`, never directly. */
   goals?: MemberGoals;

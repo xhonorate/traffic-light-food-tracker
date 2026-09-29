@@ -1,0 +1,606 @@
+openapi: 3.0.3
+info:
+  title: Traffic Light Food Tracker - 3C Platform Interface APIs
+  version: 1.0.0
+  description: |
+    https://app.ryse.wustl.edu (3C’s platform) is considered source of truth for rostering.
+
+    **Sync ID.** Every coach and every family member (parent and child
+    separately) has a Sync ID that the 3C platform generates. It is the
+    only field used to link a person across the two systems. Email and names
+    are never used for matching. Sync IDs are unique across coaches and family
+    members, are matched case-sensitively, and may contain only
+    `A-Z a-z 0-9 . _ ~ : = + -` (1 to 128 characters).
+
+    **Errors.** Every response includes `errorMessage`: `null` on success and
+    a sentence on failure. Clients should check that field. The HTTP status
+    code also indicates the result.
+
+    **Environments.** QA and production run as separate Firebase projects,
+    each with its own `X-API-Key`.
+servers:
+  - url: https://traffic-light-food-tracker.web.app/api
+    description: Production
+  - url: https://{qaHost}/api
+    description: QA
+    variables:
+      qaHost:
+        default: qa-traffic-light-food-tracker.web.app
+        description: Hosting domain of the QA Firebase project
+
+security:
+  - ApiKey: []
+
+tags:
+  - name: Data
+    description: Read family members' daily food totals
+  - name: Coaches
+    description: Add, update and remove coaches
+  - name: Families
+    description: Add, update and remove families
+
+paths:
+  /data:
+    get:
+      tags: [Data]
+      operationId: listMemberData
+      summary: Daily totals for every family member
+      description: |
+        Returns every family member who has a Sync ID. Members of families
+        created before Sync IDs existed are not included until an
+        administrator assigns them one. Results are sorted by `syncId`.
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberListResponse"
+              example:
+                errorMessage: null
+                data:
+                  - syncId: "1234abcd"
+                    days:
+                      - {
+                          isoDate: "2026-09-24 00:00:00",
+                          green: 4,
+                          red: 5,
+                          calories: 2300,
+                        }
+                      - {
+                          isoDate: "2026-09-23 00:00:00",
+                          green: 6,
+                          red: 1,
+                          calories: 1710,
+                        }
+                  - syncId: "5678efgh"
+                    days: []
+        "400":
+          description: A `from` or `to` value is not in YYYY-MM-DD format
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberListError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+  /data/{syncId}:
+    get:
+      tags: [Data]
+      operationId: getMemberData
+      summary: Daily totals for one family member
+      parameters:
+        - $ref: "#/components/parameters/SyncIdPath"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemberResponse"
+              example:
+                errorMessage: null
+                syncId: "1234abcd"
+                days:
+                  - {
+                      isoDate: "2026-09-24 00:00:00",
+                      green: 4,
+                      red: 5,
+                      calories: 2300,
+                    }
+                  - {
+                      isoDate: "2026-09-23 00:00:00",
+                      green: 6,
+                      red: 1,
+                      calories: 1710,
+                    }
+        "400":
+          description: The Sync ID or a date bound is not in a valid format
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No family member has this Sync ID. A coach's Sync ID also returns 404 here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberError" }
+              example:
+                errorMessage: "No family member has Sync ID 1234abcd."
+                syncId: "1234abcd"
+                days: null
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+  /coaches:
+    post:
+      tags: [Coaches]
+      operationId: upsertCoach
+      summary: Create or update a coach
+      description: |
+        The coach is identified by `syncId`:
+
+        - **New Sync ID:** a coach account is created. There is no password
+          yet. The coach sets one using "Forgot password" on the sign-in
+          page, or an administrator can send an invite from the app.
+        - **Existing Sync ID:** that coach's name, email and (if sent)
+          `disabled` flag are updated.
+
+        This route never creates, edits or links administrator accounts. If
+        the email already belongs to an account that is not linked to this
+        Sync ID, the request fails with 409. An administrator must link the
+        two in the app.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CoachInput" }
+            example:
+              syncId: "c-9f2e41"
+              name: "Alex Rivera"
+              email: "alex@example.org"
+      responses:
+        "200":
+          description: Created or updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CoachUpsertResponse" }
+              example: { errorMessage: null, syncId: "c-9f2e41", created: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The Sync ID belongs to an administrator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            The Sync ID belongs to a family member, or the email is used by
+            a different account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+  /coaches/{syncId}:
+    delete:
+      tags: [Coaches]
+      operationId: deleteCoach
+      summary: Delete a coach
+      description: |
+        Removes the coach's login and profile, and releases the Sync ID so it
+        can be linked again. The coach's families are **not** deleted. They
+        stay in the app without a coach until they are reassigned (for
+        example by posting to `/families` with a new `coachSyncId`).
+        Administrators cannot be deleted through this route.
+      parameters:
+        - $ref: "#/components/parameters/SyncIdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CoachDeleteResponse" }
+              example:
+                {
+                  errorMessage: null,
+                  syncId: "c-9f2e41",
+                  deleted: true,
+                  detachedFamilies: 3,
+                }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The Sync ID belongs to an administrator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No coach has this Sync ID (includes one that was already deleted)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+  /families:
+    post:
+      tags: [Families]
+      operationId: upsertFamily
+      summary: Create or update a family
+      description: |
+        A family is one parent and one child. It is identified by the
+        members' Sync IDs:
+
+        - **Both Sync IDs new:** a family is created with its access code.
+        - **Both already belong to the same family, as parent and child:**
+          that family is updated.
+        - **Any other combination** (one new and one existing, parent and
+          child swapped, IDs from different families, or a coach's Sync ID):
+          409.
+
+        On update, fields you leave out keep their current values. Goals
+        are changed only when `goals` is sent for that member.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FamilyInput" }
+            example:
+              label: "Smith family"
+              coachSyncId: "c-9f2e41"
+              parent: { syncId: "p-1a2b3c", name: "J.S." }
+              child: { syncId: "k-4d5e6f", name: "A.S." }
+      responses:
+        "200":
+          description: Created or updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FamilyUpsertResponse" }
+              example:
+                errorMessage: null
+                created: true
+                familyId: "Xb3kP0qLr8TzA1mN4cVd"
+                accessCode: "K7MP3Q"
+        "400":
+          description: |
+            A field is missing or invalid, the parent and child have the
+            same Sync ID, or `coachSyncId` is not a coach's Sync ID.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: The Sync IDs are already linked in a way that does not match one family
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+  /families/{syncId}:
+    delete:
+      tags: [Families]
+      operationId: deleteFamily
+      summary: Delete a family
+      description: |
+        `syncId` may be **either** member's Sync ID. The **whole family** is
+        permanently deleted: both members, their entire food log and the
+        family's access code. Both members' Sync IDs are released and
+        returned in `releasedSyncIds`. This cannot be undone.
+      parameters:
+        - $ref: "#/components/parameters/SyncIdPath"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FamilyDeleteResponse" }
+              example:
+                errorMessage: null
+                familyId: "Xb3kP0qLr8TzA1mN4cVd"
+                deleted: true
+                releasedSyncIds: ["p-1a2b3c", "k-4d5e6f"]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No family member has this Sync ID (includes a family that was already deleted)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "500": { $ref: "#/components/responses/ServerError" }
+        "503": { $ref: "#/components/responses/NotConfigured" }
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Shared secret. Each environment (QA, production) has a different value.
+
+  parameters:
+    SyncIdPath:
+      name: syncId
+      in: path
+      required: true
+      description: Sync ID from the external platform. Case-sensitive.
+      schema: { $ref: "#/components/schemas/SyncId" }
+    From:
+      name: from
+      in: query
+      required: false
+      description: Earliest day to include, inclusive (the member's local calendar day).
+      schema: { type: string, format: date, example: "2026-09-01" }
+    To:
+      name: to
+      in: query
+      required: false
+      description: Latest day to include, inclusive.
+      schema: { type: string, format: date, example: "2026-09-30" }
+
+  responses:
+    BadRequest:
+      description: A required field is missing or a value is not in a valid format
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { errorMessage: "syncId is required." }
+    Unauthorized:
+      description: The `X-API-Key` header is missing or wrong
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { errorMessage: "Missing or invalid X-API-Key header." }
+    MethodNotAllowed:
+      description: Wrong HTTP method for this route. The `Allow` header lists the correct one.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { errorMessage: "Use GET for this route." }
+    ServerError:
+      description: Unexpected server error. Safe to retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            {
+              errorMessage: "Something went wrong on the server. Try again shortly.",
+            }
+    NotConfigured:
+      description: The server has no API key set, so it rejects every request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { errorMessage: "The API is not configured on this server." }
+
+  schemas:
+    SyncId:
+      type: string
+      pattern: "^[A-Za-z0-9._~:=+-]{1,128}$"
+      example: "1234abcd"
+
+    Error:
+      type: object
+      required: [errorMessage]
+      properties:
+        errorMessage:
+          type: string
+          description: What went wrong. Suitable for logging.
+
+    Day:
+      type: object
+      required: [isoDate, green, red, calories]
+      properties:
+        isoDate:
+          type: string
+          description: |
+            The member's local calendar day, formatted `YYYY-MM-DD 00:00:00`.
+            Only days with at least one logged food are included. The newest
+            day comes first.
+          example: "2026-09-24 00:00:00"
+        green:
+          type: number
+          description: Green food servings. Can be fractional (for example 2.5 for half a serving).
+          example: 4
+        red:
+          type: number
+          description: Red food servings. Can be fractional.
+          example: 5
+        calories:
+          type: integer
+          description: Total calories, rounded. Foods with unknown calories count as 0.
+          example: 2300
+
+    Member:
+      type: object
+      required: [syncId, days]
+      properties:
+        syncId: { $ref: "#/components/schemas/SyncId" }
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/Day" }
+
+    MemberListResponse:
+      type: object
+      required: [errorMessage, data]
+      properties:
+        errorMessage: { type: string, nullable: true, example: null }
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Member" }
+
+    MemberListError:
+      type: object
+      required: [errorMessage, data]
+      properties:
+        errorMessage: { type: string }
+        data:
+          {
+            type: array,
+            nullable: true,
+            items: { $ref: "#/components/schemas/Member" },
+            example: null,
+          }
+
+    MemberResponse:
+      type: object
+      required: [errorMessage, syncId, days]
+      properties:
+        errorMessage: { type: string, nullable: true, example: null }
+        syncId: { $ref: "#/components/schemas/SyncId" }
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/Day" }
+
+    MemberError:
+      type: object
+      required: [errorMessage, syncId, days]
+      properties:
+        errorMessage: { type: string }
+        syncId: { type: string }
+        days:
+          {
+            type: array,
+            nullable: true,
+            items: { $ref: "#/components/schemas/Day" },
+            example: null,
+          }
+
+    Goals:
+      type: object
+      description: |
+        Daily targets. Any target left out uses its default. The child's
+        calorie target is fixed by the program at 1350, and any value sent
+        for it is ignored.
+      properties:
+        dailyGreen:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 5
+          description: The day is met with at least this many green servings.
+        dailyRed:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 2
+          description: The day is met with at most this many red servings.
+        dailyKcal:
+          type: integer
+          minimum: 0
+          maximum: 20000
+          default: 1650
+          description: Calorie target. The day is met within 150 calories either side.
+
+    CoachInput:
+      type: object
+      required: [syncId, name, email]
+      properties:
+        syncId: { $ref: "#/components/schemas/SyncId" }
+        name: { type: string, maxLength: 120, example: "Alex Rivera" }
+        email:
+          type: string
+          format: email
+          description: The coach's sign-in email. Stored in lowercase.
+          example: "alex@example.org"
+        disabled:
+          type: boolean
+          description: If true, the coach cannot use the app. If left out, the current value is kept (false for a new coach).
+
+    CoachUpsertResponse:
+      type: object
+      required: [errorMessage, syncId, created]
+      properties:
+        errorMessage: { type: string, nullable: true, example: null }
+        syncId: { $ref: "#/components/schemas/SyncId" }
+        created:
+          type: boolean
+          description: true if a new coach was created, false if an existing one was updated.
+
+    CoachDeleteResponse:
+      type: object
+      required: [errorMessage, syncId, deleted, detachedFamilies]
+      properties:
+        errorMessage: { type: string, nullable: true, example: null }
+        syncId: { $ref: "#/components/schemas/SyncId" }
+        deleted: { type: boolean, example: true }
+        detachedFamilies:
+          type: integer
+          description: How many of the coach's families were kept and now have no coach.
+
+    FamilyMemberInput:
+      type: object
+      required: [syncId, name]
+      properties:
+        syncId: { $ref: "#/components/schemas/SyncId" }
+        name:
+          type: string
+          maxLength: 80
+          description: Name or initials, as shown to the coach and the family.
+          example: "J.S."
+        goals: { $ref: "#/components/schemas/Goals" }
+
+    FamilyInput:
+      type: object
+      required: [label, parent, child]
+      properties:
+        label:
+          type: string
+          maxLength: 120
+          description: Family name or study identifier.
+          example: "Smith family"
+        coachSyncId:
+          type: string
+          description: |
+            Sync ID of the coach who owns this family. If left out when
+            creating, the family has no coach until an administrator assigns
+            one. If left out when updating, the current coach is kept.
+          example: "c-9f2e41"
+        active:
+          type: boolean
+          description: |
+            false pauses the family's access. Their data is kept. If left
+            out, the current value is kept (true for a new family).
+        parent: { $ref: "#/components/schemas/FamilyMemberInput" }
+        child: { $ref: "#/components/schemas/FamilyMemberInput" }
+
+    FamilyUpsertResponse:
+      type: object
+      required: [errorMessage, created, familyId, accessCode]
+      properties:
+        errorMessage: { type: string, nullable: true, example: null }
+        created:
+          type: boolean
+          description: true if a new family was created, false if an existing one was updated.
+        familyId:
+          type: string
+          description: The Food Tracker's internal ID for the family. For reference only. Use Sync IDs to link records.
+        accessCode:
+          type: string
+          description: Six-character code the family signs in with. Give it to the family.
+          example: "K7MP3Q"
+
+    FamilyDeleteResponse:
+      type: object
+      required: [errorMessage, familyId, deleted, releasedSyncIds]
+      properties:
+        errorMessage: { type: string, nullable: true, example: null }
+        familyId: { type: string }
+        deleted: { type: boolean, example: true }
+        releasedSyncIds:
+          type: array
+          description: Both members' Sync IDs. They are no longer linked and can be reused.
+          items: { $ref: "#/components/schemas/SyncId" }

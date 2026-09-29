@@ -42,6 +42,16 @@ service cloud.firestore {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
 
+    // Sync IDs link people to the external platform and must stay in step
+    // with the `syncIds` index, so only Cloud Functions may change them.
+    function memberSyncId(data, memberId) {
+      return data.get('members', {}).get(memberId, {}).get('syncId', '');
+    }
+    function memberSyncIdsUnchanged() {
+      return memberSyncId(request.resource.data, 'parent') == memberSyncId(resource.data, 'parent')
+        && memberSyncId(request.resource.data, 'child') == memberSyncId(resource.data, 'child');
+    }
+
     // Can this caller see a given family's records at all?
     function canReadFamily(familyId) {
       return isAdmin()
@@ -69,7 +79,7 @@ service cloud.firestore {
       // own lastLoginAt. Crucially `role` is never client-writable -- it is a
       // mirror of the custom claim, and changing it here would grant nothing
       // but would badly mislead the UI.
-      allow update: if (isAdmin() && !touched().hasAny(['role', 'email', 'createdAt']))
+      allow update: if (isAdmin() && !touched().hasAny(['role', 'email', 'createdAt', 'syncId']))
         || (signedIn() && request.auth.uid == uid && touched().hasOnly(['lastLoginAt']));
 
       // Creating and deleting accounts must go through Cloud Functions so the
@@ -87,6 +97,14 @@ service cloud.firestore {
     }
 
     // -----------------------------------------------------------------------
+    // Sync ID index (syncId -> coach or family member). Written only by
+    // Cloud Functions, which use it to keep every Sync ID unique.
+    // -----------------------------------------------------------------------
+    match /syncIds/{syncId} {
+      allow read, write: if false;
+    }
+
+    // -----------------------------------------------------------------------
     // Families.
     // -----------------------------------------------------------------------
     match /families/{familyId} {
@@ -98,11 +116,12 @@ service cloud.firestore {
 
       allow update: if
         // Admin: anything except re-keying the code or owner by hand.
-        (isAdmin() && !touched().hasAny(['code', 'createdAt']))
+        (isAdmin() && !touched().hasAny(['code', 'createdAt']) && memberSyncIdsUnchanged())
         // Coach: only their own families, and not the code or ownership.
         || (isCoach()
             && resource.data.coachId == request.auth.uid
-            && !touched().hasAny(['code', 'coachId', 'createdAt']))
+            && !touched().hasAny(['code', 'coachId', 'createdAt'])
+            && memberSyncIdsUnchanged())
         // Family: may only report that they are active.
         || (isFamily()
             && familyId == myFamilyId()

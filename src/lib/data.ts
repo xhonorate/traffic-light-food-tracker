@@ -78,7 +78,7 @@ export function subscribeCoaches(cb: (users: UserDoc[]) => void, onError?: (e: E
 }
 
 export const createCoach = httpsCallable<
-  { email: string; name: string; role: "coach" | "admin" },
+  { email: string; name: string; role: "coach" | "admin"; syncId?: string },
   { uid: string; email: string }
 >(functions, "createCoach");
 
@@ -136,11 +136,23 @@ export const createFamily = httpsCallable<
   {
     label: string;
     coachId?: string;
-    parent: { name: string; goals: MemberGoals };
-    child: { name: string; goals: MemberGoals };
+    parent: { name: string; goals: MemberGoals; syncId: string };
+    child: { name: string; goals: MemberGoals; syncId: string };
   },
   { familyId: string; code: string }
 >(functions, "createFamily");
+
+/** Link a coach or family member to a Sync ID (admin only). Server-side so
+ *  uniqueness is checked and the old ID released in one transaction. */
+export const setSyncId = httpsCallable<
+  {
+    syncId: string;
+    target:
+      | { kind: "staff"; uid: string }
+      | { kind: "member"; familyId: string; memberId: MemberId };
+  },
+  { ok: true }
+>(functions, "setSyncId");
 
 export const deleteFamily = httpsCallable<{ familyId: string }, { ok: true }>(functions, "deleteFamily");
 
@@ -148,6 +160,21 @@ export const regenerateCode = httpsCallable<{ familyId: string }, { code: string
 
 export async function updateFamily(familyId: string, patch: Partial<FamilyDoc>): Promise<void> {
   await updateDoc(doc(db, "families", familyId), patch as Record<string, unknown>);
+}
+
+/** Save the editable parts of a family. Written field by field so the
+ *  members' Sync IDs, which only the server may change, are left alone. */
+export async function saveFamilyDetails(
+  familyId: string,
+  v: { label: string; parent: { name: string; goals: MemberGoals }; child: { name: string; goals: MemberGoals } },
+): Promise<void> {
+  await updateDoc(doc(db, "families", familyId), {
+    label: v.label,
+    "members.parent.name": v.parent.name,
+    "members.parent.goals": v.parent.goals,
+    "members.child.name": v.child.name,
+    "members.child.goals": v.child.goals,
+  });
 }
 
 /** Write one member's daily goals. Coaches own this; families cannot change it. */

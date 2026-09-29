@@ -3,16 +3,23 @@
  *
  * Everything that must not be trusted to a browser lives here: minting
  * sessions from family codes, creating and deleting accounts, "login as",
- * and proxying the USDA lookup so the API key stays server-side.
+ * proxying the USDA lookup so the API key stays server-side, and the HTTP
+ * API the external platform (3C) uses to roster people and read their data.
  */
 
 import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
-import { HttpsError, onCall, type CallableRequest } from "firebase-functions/v2/https";
+import {
+  getFirestore, type DocumentReference, type DocumentSnapshot, type Query, type Transaction,
+} from "firebase-admin/firestore";
+import { HttpsError, onCall, onRequest, type CallableRequest } from "firebase-functions/v2/https";
 import { defineSecret } from "firebase-functions/params";
 import { setGlobalOptions } from "firebase-functions/v2";
 import { logger } from "firebase-functions";
+import {
+  apiKeyMatches, readDateBound, readSyncId, rollUpDays, sameOwner,
+  type MemberId, type SyncOwner,
+} from "./sync";
 
 initializeApp();
 const db = getFirestore();
@@ -23,6 +30,11 @@ setGlobalOptions({ region: "us-central1", maxInstances: 10 });
 /** USDA FoodData Central key. Set with:
  *  `firebase functions:secrets:set USDA_API_KEY` */
 const USDA_API_KEY = defineSecret("USDA_API_KEY");
+
+/** Shared key the external platform sends as `X-API-Key`. Each Firebase
+ *  project (QA, prod) holds its own value. Set with:
+ *  `firebase functions:secrets:set SYNC_API_KEY` */
+const SYNC_API_KEY = defineSecret("SYNC_API_KEY");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -160,6 +172,40 @@ async function allocateCode(familyId: string): Promise<string> {
 
 const familyUid = (familyId: string) => `fam_${familyId}`;
 
+const syncRef = (syncId: string) => db.doc(`syncIds/${syncId}`);
+
+const describeOwner = (o: SyncOwner) =>
+  o.kind === "staff" ? "a coach or administrator" : "a family member";
+
+interface SyncClaim {
+  syncId: string;
+  owner: SyncOwner;
+}
+
+/**
+ * Fail if any of these Sync IDs already belongs to someone other than the
+ * intended owner. Inside a transaction this is the uniqueness guarantee, and
+ * it only reads -- call it before the transaction writes anything. Outside
+ * one it is a fast pre-check, so a clash is reported before an Auth user or
+ * access code gets created and has to be rolled back.
+ */
+async function assertSyncIdsFree(claims: SyncClaim[], tx?: Transaction): Promise<void> {
+  if (new Set(claims.map((c) => c.syncId)).size !== claims.length) {
+    throw new HttpsError("invalid-argument", "Each person needs a different Sync ID.");
+  }
+  const refs = claims.map((c) => syncRef(c.syncId));
+  const snaps = tx ? await tx.getAll(...refs) : await db.getAll(...refs);
+  snaps.forEach((snap, i) => {
+    const existing = snap.data() as SyncOwner | undefined;
+    if (existing && !sameOwner(existing, claims[i].owner)) {
+      throw new HttpsError(
+        "already-exists",
+        `Sync ID ${claims[i].syncId} is already linked to ${describeOwner(existing)}.`,
+      );
+    }
+  });
+}
+
 /**
  * Mint a custom token, translating the one failure mode that is a deployment
  * problem rather than a caller problem.
@@ -227,16 +273,28 @@ export const claimFirstAdmin = onCall(async (req) => {
 // Coach / admin accounts
 // ---------------------------------------------------------------------------
 
-export const createCoach = onCall(async (req) => {
-  requireRole(req, "admin");
-
-  const email = str(req.data?.email, "Email").toLowerCase();
-  const name = str(req.data?.name, "Name", 120);
-  const role = req.data?.role === "admin" ? "admin" : "coach";
-
+const readEmail = (v: unknown, field = "Email"): string => {
+  const email = str(v, field).toLowerCase();
   if (!/^\S+@\S+\.\S+$/.test(email)) {
     throw new HttpsError("invalid-argument", "That does not look like an email address.");
   }
+  return email;
+};
+
+interface NewStaff {
+  email: string;
+  name: string;
+  role: "coach" | "admin";
+  /** Required for coaches; optional for administrators. */
+  syncId: string | null;
+  disabled?: boolean;
+}
+
+/** Create a coach or admin: Auth user, role claim, profile and Sync ID link.
+ *  Shared by the admin screen and the external API. */
+async function createStaffAccount(input: NewStaff): Promise<{ uid: string; email: string }> {
+  const { email, name, role, syncId } = input;
+  if (syncId) await assertSyncIdsFree([{ syncId, owner: { kind: "staff", uid: "" } }]);
 
   let uid: string;
   try {
@@ -251,13 +309,41 @@ export const createCoach = onCall(async (req) => {
     throw e;
   }
 
-  await auth.setCustomUserClaims(uid, { role });
-  await db.doc(`users/${uid}`).set({
-    email, name, role, disabled: false, createdAt: Date.now(), lastLoginAt: null,
-  });
+  try {
+    await auth.setCustomUserClaims(uid, { role });
+    await db.runTransaction(async (tx) => {
+      const claims = syncId ? [{ syncId, owner: { kind: "staff" as const, uid } }] : [];
+      if (syncId) await assertSyncIdsFree(claims, tx);
+      tx.set(db.doc(`users/${uid}`), {
+        email, name, role, disabled: input.disabled === true,
+        createdAt: Date.now(), lastLoginAt: null,
+        ...(syncId ? { syncId } : {}),
+      });
+      if (syncId) tx.set(syncRef(syncId), { kind: "staff", uid, createdAt: Date.now() });
+    });
+  } catch (e) {
+    // Lost a race for the Sync ID: do not leave a half-made login behind.
+    await auth.deleteUser(uid).catch(() => undefined);
+    throw e;
+  }
 
-  logger.info("Account created", { uid, email, role });
+  logger.info("Account created", { uid, email, role, syncId });
   return { uid, email };
+}
+
+export const createCoach = onCall(async (req) => {
+  requireRole(req, "admin");
+
+  const email = readEmail(req.data?.email);
+  const name = str(req.data?.name, "Name", 120);
+  const role = req.data?.role === "admin" ? "admin" : "coach";
+  // Coaches exist on the external platform first, so they always arrive with
+  // a Sync ID. Administrators are local to this app and may have none.
+  const syncId = role === "coach" || req.data?.syncId
+    ? readSyncId(req.data?.syncId, "Sync ID")
+    : null;
+
+  return createStaffAccount({ email, name, role, syncId });
 });
 
 export const deleteCoach = onCall(async (req) => {
@@ -268,12 +354,23 @@ export const deleteCoach = onCall(async (req) => {
     throw new HttpsError("failed-precondition", "You cannot delete your own account.");
   }
 
+  await deleteStaffAccount(uid);
+  return { ok: true as const };
+});
+
+/** Remove a coach or admin. Their families are kept, unassigned. Shared by
+ *  the admin screen and the external API. */
+async function deleteStaffAccount(uid: string): Promise<{ detachedFamilies: number }> {
   // Never orphan data silently: detach the families first so they remain
   // visible to other admins and can be reassigned.
   const owned = await db.collection("families").where("coachId", "==", uid).get();
+  const userSnap = await db.doc(`users/${uid}`).get();
+  const syncId = userSnap.data()?.syncId as string | undefined;
   const batch = db.batch();
   owned.docs.forEach((d) => batch.update(d.ref, { coachId: "" }));
   batch.delete(db.doc(`users/${uid}`));
+  // Free the Sync ID so the external platform can link it again.
+  if (syncId) batch.delete(syncRef(syncId));
   await batch.commit();
 
   await auth.deleteUser(uid).catch((e) => {
@@ -281,47 +378,138 @@ export const deleteCoach = onCall(async (req) => {
   });
 
   logger.info("Account deleted", { uid, detachedFamilies: owned.size });
-  return { ok: true as const };
-});
+  return { detachedFamilies: owned.size };
+}
 
 // ---------------------------------------------------------------------------
 // Families
 // ---------------------------------------------------------------------------
+
+interface NewMember {
+  name: string;
+  goals: MemberGoals;
+  syncId: string;
+}
+
+interface NewFamily {
+  label: string;
+  /** Owning coach's uid, or "" for unassigned. */
+  coachId: string;
+  active: boolean;
+  parent: NewMember;
+  child: NewMember;
+}
+
+const MEMBER_IDS: MemberId[] = ["parent", "child"];
+
+/** Create a family with its access code and both members' Sync ID links.
+ *  Shared by the in-app form and the external API. */
+async function createFamilyRecord(f: NewFamily): Promise<{ familyId: string; code: string }> {
+  const ref = db.collection("families").doc();
+  const claims: SyncClaim[] = MEMBER_IDS.map((memberId) => ({
+    syncId: f[memberId].syncId,
+    owner: { kind: "member", familyId: ref.id, memberId },
+  }));
+
+  await assertSyncIdsFree(claims);
+  const code = await allocateCode(ref.id);
+
+  try {
+    await db.runTransaction(async (tx) => {
+      await assertSyncIdsFree(claims, tx);
+      tx.set(ref, {
+        code, coachId: f.coachId, label: f.label, active: f.active,
+        createdAt: Date.now(), lastActiveAt: null,
+        members: {
+          parent: { name: f.parent.name, goals: f.parent.goals, syncId: f.parent.syncId },
+          child: { name: f.child.name, goals: f.child.goals, syncId: f.child.syncId },
+        },
+      });
+      for (const c of claims) tx.set(syncRef(c.syncId), { ...c.owner, createdAt: Date.now() });
+    });
+  } catch (e) {
+    // Lost a race for a Sync ID: release the code rather than strand it.
+    await db.doc(`codes/${code}`).delete().catch(() => undefined);
+    throw e;
+  }
+
+  // A real Auth user backs the family so its role claim survives token
+  // refreshes rather than living only inside one custom token.
+  await auth.createUser({ uid: familyUid(ref.id), displayName: f.label }).catch(() => undefined);
+  await auth.setCustomUserClaims(familyUid(ref.id), { role: "family", familyId: ref.id });
+
+  logger.info("Family created", { familyId: ref.id, coachId: f.coachId });
+  return { familyId: ref.id, code };
+}
 
 export const createFamily = onCall(async (req) => {
   const caller = requireRole(req, "admin", "coach");
   await assertEnabled(caller.uid);
 
   const label = str(req.data?.label, "Family name", 120);
-  const parentName = str(req.data?.parent?.name, "Parent name", 80);
-  const childName = str(req.data?.child?.name, "Child name", 80);
-  const parentGoals = readGoals(req.data?.parent?.goals, "Parent");
-  const childGoals = readGoals(req.data?.child?.goals, "Child");
 
   // An admin may create on a coach's behalf; a coach always owns their own.
   const coachId = caller.role === "admin" && typeof req.data?.coachId === "string" && req.data.coachId
     ? req.data.coachId
     : caller.uid;
 
-  const ref = db.collection("families").doc();
-  const code = await allocateCode(ref.id);
-
-  await ref.set({
-    code, coachId, label, active: true,
-    createdAt: Date.now(), lastActiveAt: null,
-    members: {
-      parent: { name: parentName, goals: parentGoals },
-      child: { name: childName, goals: childGoals },
+  return createFamilyRecord({
+    label, coachId, active: true,
+    parent: {
+      name: str(req.data?.parent?.name, "Parent name", 80),
+      goals: readGoals(req.data?.parent?.goals, "Parent"),
+      syncId: readSyncId(req.data?.parent?.syncId, "Parent Sync ID"),
+    },
+    child: {
+      name: str(req.data?.child?.name, "Child name", 80),
+      goals: readGoals(req.data?.child?.goals, "Child"),
+      syncId: readSyncId(req.data?.child?.syncId, "Child Sync ID"),
     },
   });
+});
 
-  // A real Auth user backs the family so its role claim survives token
-  // refreshes rather than living only inside one custom token.
-  await auth.createUser({ uid: familyUid(ref.id), displayName: label }).catch(() => undefined);
-  await auth.setCustomUserClaims(familyUid(ref.id), { role: "family", familyId: ref.id });
+/**
+ * Link, or re-link, a coach or family member to a Sync ID. Admin only: this
+ * is how records created before Sync IDs existed get connected, and how a
+ * mistyped ID gets corrected. The old ID is released in the same transaction.
+ */
+export const setSyncId = onCall(async (req) => {
+  requireRole(req, "admin");
+  const syncId = readSyncId(req.data?.syncId, "Sync ID");
+  const target = req.data?.target as Record<string, unknown> | undefined;
 
-  logger.info("Family created", { familyId: ref.id, coachId });
-  return { familyId: ref.id, code };
+  let owner: SyncOwner;
+  if (target?.kind === "staff") {
+    owner = { kind: "staff", uid: str(target.uid, "User id") };
+  } else if (target?.kind === "member" && (target.memberId === "parent" || target.memberId === "child")) {
+    owner = { kind: "member", familyId: str(target.familyId, "Family id"), memberId: target.memberId };
+  } else {
+    throw new HttpsError("invalid-argument", "Unknown Sync ID target.");
+  }
+
+  const docRef = owner.kind === "staff"
+    ? db.doc(`users/${owner.uid}`)
+    : db.doc(`families/${owner.familyId}`);
+  const field = owner.kind === "staff" ? "syncId" : `members.${owner.memberId}.syncId`;
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    if (!snap.exists) throw new HttpsError("not-found", "That record no longer exists.");
+    const current = (owner.kind === "staff"
+      ? snap.data()?.syncId
+      : snap.data()?.members?.[owner.memberId]?.syncId) as string | undefined;
+    if (current === syncId) return;
+
+    await assertSyncIdsFree([{ syncId, owner }], tx);
+    const old = current ? await tx.get(syncRef(current)) : null;
+
+    if (old?.exists && sameOwner(old.data() as SyncOwner, owner)) tx.delete(old.ref);
+    tx.set(syncRef(syncId), { ...owner, createdAt: Date.now() });
+    tx.update(docRef, { [field]: syncId });
+  });
+
+  logger.info("Sync ID set", { owner, syncId });
+  return { ok: true as const };
 });
 
 /**
@@ -364,6 +552,15 @@ export const deleteFamily = onCall(async (req) => {
   const familyId = str(req.data?.familyId, "Family id");
   const snap = await assertFamilyAccess(caller, familyId);
 
+  await deleteFamilyRecord(snap);
+  return { ok: true as const };
+});
+
+/** Permanently remove a family, its whole log, its code and its members'
+ *  Sync ID links. Shared by the app and the external API. */
+async function deleteFamilyRecord(snap: DocumentSnapshot): Promise<void> {
+  const familyId = snap.id;
+
   // Firestore does not cascade; remove subcollections explicitly.
   for (const sub of ["entries", "quickFoods"]) {
     // eslint-disable-next-line no-await-in-loop
@@ -373,14 +570,18 @@ export const deleteFamily = onCall(async (req) => {
   const code = snap.data()?.code as string | undefined;
   const batch = db.batch();
   if (code) batch.delete(db.doc(`codes/${code}`));
+  // Free the members' Sync IDs so the external platform can link them again.
+  for (const m of MEMBER_IDS) {
+    const syncId = snap.data()?.members?.[m]?.syncId as string | undefined;
+    if (syncId) batch.delete(syncRef(syncId));
+  }
   batch.delete(snap.ref);
   await batch.commit();
 
   await auth.deleteUser(familyUid(familyId)).catch(() => undefined);
 
   logger.info("Family deleted", { familyId });
-  return { ok: true as const };
-});
+}
 
 // ---------------------------------------------------------------------------
 // Family code sign-in
@@ -809,3 +1010,338 @@ export const recordLogin = onCall(async (req) => {
   return { ok: true as const };
 });
 
+
+// ---------------------------------------------------------------------------
+// External platform API (3C)
+//
+// Served at /api/** through a Hosting rewrite. Every response carries
+// `errorMessage`: null on success, a sentence on failure -- that field is the
+// contract 3C checks. HTTP status codes are set too, for anything that looks.
+//
+//   GET  /api/data              every linked family member's daily totals
+//   GET  /api/data/{syncId}     one family member's daily totals
+//   POST /api/coaches           create or update a coach, keyed by syncId
+//   POST /api/families          create or update a family, keyed by the
+//                               members' syncIds
+//   DELETE /api/coaches/{syncId}   delete a coach; families become unassigned
+//   DELETE /api/families/{syncId}  delete the family either member belongs to
+//
+// The full contract is in openapi.yaml at the repo root.
+//
+// The data routes take optional `from` / `to` query bounds (YYYY-MM-DD).
+// ---------------------------------------------------------------------------
+
+type Body = Record<string, unknown>;
+
+const asBody = (v: unknown): Body =>
+  v && typeof v === "object" && !Array.isArray(v) ? (v as Body) : {};
+
+const optionalBool = (v: unknown, field: string): boolean | undefined => {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "boolean") throw new HttpsError("invalid-argument", `${field} must be true or false.`);
+  return v;
+};
+
+async function fetchEntries(
+  familyRef: DocumentReference,
+  memberId: MemberId | null,
+  from: string | null,
+  to: string | null,
+) {
+  let q: Query = familyRef.collection("entries");
+  if (memberId) q = q.where("memberId", "==", memberId);
+  if (from) q = q.where("date", ">=", from);
+  if (to) q = q.where("date", "<=", to);
+  const snap = await q.select("memberId", "date", "color", "servings", "kcal").get();
+  return snap.docs.map((d) => d.data());
+}
+
+/** Every family member that has a Sync ID. Members of families created
+ *  before Sync IDs existed are left out: they cannot be linked yet. */
+async function apiAllMembers(from: string | null, to: string | null) {
+  const families = await db.collection("families").get();
+  const perFamily = await Promise.all(families.docs.map(async (fam) => {
+    const linked = MEMBER_IDS.filter((m) => fam.data().members?.[m]?.syncId);
+    if (linked.length === 0) return [];
+    const entries = await fetchEntries(fam.ref, null, from, to);
+    return linked.map((m) => ({
+      syncId: fam.data().members[m].syncId as string,
+      days: rollUpDays(entries.filter((e) => e.memberId === m)),
+    }));
+  }));
+  return perFamily.flat().sort((a, b) => a.syncId.localeCompare(b.syncId));
+}
+
+async function apiOneMember(syncId: string, from: string | null, to: string | null) {
+  const owner = (await syncRef(syncId).get()).data() as SyncOwner | undefined;
+  if (owner?.kind !== "member") {
+    throw new HttpsError("not-found", `No family member has Sync ID ${syncId}.`);
+  }
+  const entries = await fetchEntries(db.doc(`families/${owner.familyId}`), owner.memberId, from, to);
+  return { syncId, days: rollUpDays(entries) };
+}
+
+/** Resolve a coach's Sync ID to their uid. */
+async function coachUidFor(syncId: string): Promise<string> {
+  const owner = (await syncRef(syncId).get()).data() as SyncOwner | undefined;
+  if (owner?.kind !== "staff") {
+    throw new HttpsError("invalid-argument", `No coach has Sync ID ${syncId}.`);
+  }
+  return owner.uid;
+}
+
+/**
+ * Create a coach, or update the one already linked to this Sync ID.
+ *
+ * Never links by email: an existing account with the same address but no
+ * Sync ID is reported as a conflict, for an admin to link in the app.
+ * Administrators are out of reach of this route entirely.
+ */
+async function apiUpsertCoach(body: Body) {
+  const syncId = readSyncId(body.syncId, "syncId");
+  const name = str(body.name, "name", 120);
+  const email = readEmail(body.email, "email");
+  const disabled = optionalBool(body.disabled, "disabled");
+
+  const owner = (await syncRef(syncId).get()).data() as SyncOwner | undefined;
+  if (!owner) {
+    try {
+      await createStaffAccount({ email, name, role: "coach", syncId, disabled });
+    } catch (e) {
+      if (e instanceof HttpsError && e.code === "already-exists" && e.message.includes("email")) {
+        throw new HttpsError(
+          "already-exists",
+          "An account with that email already exists but is not linked to this Sync ID. " +
+          "An administrator can link it from the Coaches page.",
+        );
+      }
+      throw e;
+    }
+    return { syncId, created: true };
+  }
+  if (owner.kind !== "staff") {
+    throw new HttpsError("already-exists", `Sync ID ${syncId} belongs to a family member.`);
+  }
+
+  const userRef = db.doc(`users/${owner.uid}`);
+  const user = (await userRef.get()).data();
+  if (!user) throw new HttpsError("not-found", "That coach's account is missing. Ask an administrator.");
+  if (user.role === "admin") {
+    throw new HttpsError(
+      "permission-denied",
+      "That Sync ID belongs to an administrator, who can only be changed in the app.",
+    );
+  }
+
+  try {
+    await auth.updateUser(owner.uid, { email, displayName: name });
+  } catch (e) {
+    if ((e as { code?: string }).code === "auth/email-already-exists") {
+      throw new HttpsError("already-exists", "Another account already uses that email.");
+    }
+    throw e;
+  }
+  await userRef.update({ name, email, ...(disabled === undefined ? {} : { disabled }) });
+
+  logger.info("Coach updated via API", { uid: owner.uid, syncId });
+  return { syncId, created: false };
+}
+
+/**
+ * Create a family, or update the one both Sync IDs already point at. A
+ * family is identified by its members: both IDs new means create, both
+ * linked to the same family means update, anything else is a conflict.
+ */
+async function apiUpsertFamily(body: Body) {
+  const label = str(body.label, "label", 120);
+  const input = Object.fromEntries(MEMBER_IDS.map((m) => {
+    const raw = asBody(body[m]);
+    return [m, {
+      syncId: readSyncId(raw.syncId, `${m}.syncId`),
+      name: str(raw.name, `${m}.name`, 80),
+      rawGoals: raw.goals,
+    }];
+  })) as Record<MemberId, { syncId: string; name: string; rawGoals: unknown }>;
+  const coachId = typeof body.coachSyncId === "string" && body.coachSyncId
+    ? await coachUidFor(readSyncId(body.coachSyncId, "coachSyncId"))
+    : undefined;
+  const active = optionalBool(body.active, "active");
+
+  if (input.parent.syncId === input.child.syncId) {
+    throw new HttpsError("invalid-argument", "parent.syncId and child.syncId must be different.");
+  }
+
+  const [p, c] = await db.getAll(syncRef(input.parent.syncId), syncRef(input.child.syncId));
+  const pOwner = p.data() as SyncOwner | undefined;
+  const cOwner = c.data() as SyncOwner | undefined;
+  const goalsFor = (m: MemberId) => readGoals(input[m].rawGoals, m === "parent" ? "Parent" : "Child");
+
+  if (!pOwner && !cOwner) {
+    const { familyId, code } = await createFamilyRecord({
+      label, coachId: coachId ?? "", active: active ?? true,
+      parent: { name: input.parent.name, syncId: input.parent.syncId, goals: goalsFor("parent") },
+      child: { name: input.child.name, syncId: input.child.syncId, goals: goalsFor("child") },
+    });
+    return { created: true, familyId, accessCode: code };
+  }
+
+  if (
+    pOwner?.kind !== "member" || pOwner.memberId !== "parent"
+    || cOwner?.kind !== "member" || cOwner.memberId !== "child"
+    || pOwner.familyId !== cOwner.familyId
+  ) {
+    throw new HttpsError(
+      "already-exists",
+      "Those Sync IDs are already linked to different people. Both must be new, " +
+      "or both must belong to the same existing family as parent and child.",
+    );
+  }
+
+  const ref = db.doc(`families/${pOwner.familyId}`);
+  const patch: Body = { label };
+  for (const m of MEMBER_IDS) {
+    patch[`members.${m}.name`] = input[m].name;
+    // Goals are coach territory; only overwrite them when 3C sends some.
+    if (input[m].rawGoals !== undefined) patch[`members.${m}.goals`] = goalsFor(m);
+  }
+  if (coachId !== undefined) patch.coachId = coachId;
+  if (active !== undefined) patch.active = active;
+  await ref.update(patch);
+
+  const code = (await ref.get()).data()?.code as string;
+  logger.info("Family updated via API", { familyId: ref.id });
+  return { created: false, familyId: ref.id, accessCode: code };
+}
+
+/** Delete the coach linked to this Sync ID. Their families are kept and
+ *  become unassigned, exactly as when an admin deletes a coach in the app. */
+async function apiDeleteCoach(syncId: string) {
+  const owner = (await syncRef(syncId).get()).data() as SyncOwner | undefined;
+  if (owner?.kind !== "staff") {
+    throw new HttpsError("not-found", `No coach has Sync ID ${syncId}.`);
+  }
+  const user = (await db.doc(`users/${owner.uid}`).get()).data();
+  if (user?.role === "admin") {
+    throw new HttpsError(
+      "permission-denied",
+      "That Sync ID belongs to an administrator, who can only be removed in the app.",
+    );
+  }
+  const { detachedFamilies } = await deleteStaffAccount(owner.uid);
+  return { syncId, deleted: true, detachedFamilies };
+}
+
+/**
+ * Delete the whole family that either member's Sync ID belongs to: both
+ * members, their entire food log and the access code. Both members' Sync IDs
+ * are released. A family is one unit here -- there is no removing just the
+ * parent or just the child.
+ */
+async function apiDeleteFamily(syncId: string) {
+  const owner = (await syncRef(syncId).get()).data() as SyncOwner | undefined;
+  if (owner?.kind !== "member") {
+    throw new HttpsError("not-found", `No family member has Sync ID ${syncId}.`);
+  }
+  const snap = await db.doc(`families/${owner.familyId}`).get();
+  if (!snap.exists) {
+    // A dangling link: the family went some other way. Tidy up so the ID
+    // can be reused, and report it as gone.
+    await syncRef(syncId).delete();
+    throw new HttpsError("not-found", `No family member has Sync ID ${syncId}.`);
+  }
+  const releasedSyncIds = MEMBER_IDS
+    .map((m) => snap.data()?.members?.[m]?.syncId as string | undefined)
+    .filter((s): s is string => Boolean(s));
+  await deleteFamilyRecord(snap);
+  return { familyId: snap.id, deleted: true, releasedSyncIds };
+}
+
+export const api = onRequest({ secrets: [SYNC_API_KEY] }, async (req, res) => {
+  // Hosting's CDN would otherwise be free to cache one family's data.
+  res.set("Cache-Control", "no-store");
+
+  // Behind the Hosting rewrite the path keeps its /api prefix; called on the
+  // function URL directly it does not. Accept both.
+  let parts: string[];
+  try {
+    parts = req.path.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    parts = [];
+  }
+  if (parts[0] === "api") parts.shift();
+  const [resource, id, ...rest] = parts;
+
+  // What an error response carries besides errorMessage, so each route's
+  // failure has the same shape as its success.
+  let emptyShape: Body = {};
+  if (resource === "data") emptyShape = id ? { syncId: id, days: null } : { data: null };
+
+  const fail = (status: number, message: string) => {
+    res.status(status).json({ errorMessage: message, ...emptyShape });
+  };
+
+  try {
+    const expected = SYNC_API_KEY.value().replace(/^﻿/, "").trim();
+    if (!expected) {
+      logger.error("SYNC_API_KEY is not set; the external API is refusing every request.");
+      fail(503, "The API is not configured on this server.");
+      return;
+    }
+    if (!apiKeyMatches(req.get("X-API-Key")?.trim(), expected)) {
+      logger.warn("External API: bad or missing key", { path: req.path });
+      fail(401, "Missing or invalid X-API-Key header.");
+      return;
+    }
+
+    const allow = (method: string): boolean => {
+      if (req.method === method) return true;
+      res.set("Allow", method);
+      fail(405, `Use ${method} for this route.`);
+      return false;
+    };
+
+    if (resource === "data" && rest.length === 0) {
+      if (!allow("GET")) return;
+      const from = readDateBound(req.query.from, "from");
+      const to = readDateBound(req.query.to, "to");
+      const payload = id
+        ? await apiOneMember(readSyncId(id, "Sync ID"), from, to)
+        : { data: await apiAllMembers(from, to) };
+      res.status(200).json({ errorMessage: null, ...payload });
+      return;
+    }
+
+    if (resource === "coaches" && !id) {
+      if (!allow("POST")) return;
+      res.status(200).json({ errorMessage: null, ...(await apiUpsertCoach(asBody(req.body))) });
+      return;
+    }
+
+    if (resource === "coaches" && id && rest.length === 0) {
+      if (!allow("DELETE")) return;
+      res.status(200).json({ errorMessage: null, ...(await apiDeleteCoach(readSyncId(id, "Sync ID"))) });
+      return;
+    }
+
+    if (resource === "families" && !id) {
+      if (!allow("POST")) return;
+      res.status(200).json({ errorMessage: null, ...(await apiUpsertFamily(asBody(req.body))) });
+      return;
+    }
+
+    if (resource === "families" && id && rest.length === 0) {
+      if (!allow("DELETE")) return;
+      res.status(200).json({ errorMessage: null, ...(await apiDeleteFamily(readSyncId(id, "Sync ID"))) });
+      return;
+    }
+
+    fail(404, "No such API route.");
+  } catch (e) {
+    if (e instanceof HttpsError) {
+      fail(e.httpErrorCode.status, e.message);
+      return;
+    }
+    logger.error("External API failed", { path: req.path, error: (e as Error).message });
+    fail(500, "Something went wrong on the server. Try again shortly.");
+  }
+});

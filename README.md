@@ -152,12 +152,13 @@ breaks; the tester is the safety net.
 ```
 config/rules                              the rule set (admin-editable)
 config/app                                food guide URL, program name
-users/{uid}                               coaches and admins
+users/{uid}                               coaches and admins, with syncId
 codes/{CODE}          → { familyId }      never readable by any client
+syncIds/{syncId}      → { kind, … }       Sync ID → coach or member; server-only
 families/{familyId}
   ├── code, coachId, label, active, lastActiveAt
-  ├── members.parent  { name, goals }
-  ├── members.child   { name, goals }
+  ├── members.parent  { name, goals, syncId }
+  ├── members.child   { name, goals, syncId }
   ├── entries/{id}                        one logged food, with its meal
   └── quickFoods/{id}                     frequently used foods
 ```
@@ -354,13 +355,75 @@ The WASM file is served from this site, not a CDN. Only EAN/UPC are read.
 `npm run test:barcode` renders real EAN/UPC symbols into noisy, soft-focus,
 tilted 1280×720 frames and checks the WASM decoder reads each one.
 
-### Programmatic export
+---
 
-For a scheduled feed into another system rather than a manual download, add a
-Cloud Function that reads the same collections and serves them over HTTPS —
-`summarise()` in [src/lib/csv.ts](src/lib/csv.ts) already produces the exact
-row shape, and `fetchEntriesRange()` in [src/lib/data.ts](src/lib/data.ts) does
-the fetching. Authenticate it with a service account rather than a user session.
+## External platform (3C) integration
+
+Coaches and family members are created on the external platform first. Each
+carries a **Sync ID**, and the Sync ID is the only field that links a person
+across the two systems. Email and names are never used for matching.
+
+- Every coach and every family member (parent and child separately) has one.
+  It is required when creating either, in the app or through the API.
+  Administrators may have one but do not need it.
+- Sync IDs are unique across coaches and members. The `syncIds` collection
+  enforces this, and only Cloud Functions write to it.
+- Admins can link an older record, or correct a mistyped ID, from **Coaches →
+  Set Sync ID** or **Families → Edit**. Coaches can see their families' Sync
+  IDs but cannot change them.
+- Deleting a coach or family frees their Sync IDs.
+
+### API
+
+Base URL: `https://<project>.web.app/api`. Every request needs the
+`X-API-Key` header, which must match the `SYNC_API_KEY` secret (each Firebase
+project, QA or prod, has its own). Every response includes `errorMessage`,
+which is `null` on success and a sentence on failure. The HTTP status code is
+set to match: 400 bad input, 401 bad key, 404 unknown Sync ID, 409 conflict.
+
+| Route | Does |
+|---|---|
+| `GET /api/data` | Daily totals for every family member that has a Sync ID |
+| `GET /api/data/{syncId}` | Daily totals for one family member |
+| `POST /api/coaches` | Create a coach, or update the one with this Sync ID |
+| `POST /api/families` | Create a family, or update the one both Sync IDs belong to |
+| `DELETE /api/coaches/{syncId}` | Delete a coach; their families are kept, unassigned |
+| `DELETE /api/families/{syncId}` | Delete the **whole** family either member's Sync ID belongs to |
+
+The full contract is in [openapi.yaml](openapi.yaml) (OpenAPI 3.0). Paste it
+into <https://editor.swagger.io> to browse it or generate a client.
+
+The data routes accept optional `?from=YYYY-MM-DD&to=YYYY-MM-DD` bounds. Each
+day lists `green` and `red` as **servings**, the same way goals are scored,
+so fractional values like `2.5` are possible. `calories` is the rounded total,
+with unknown calories counted as 0. Days with nothing logged are left out, and
+the newest day comes first.
+
+```json
+{ "errorMessage": null,
+  "data": [ { "syncId": "1234abcd",
+              "days": [ { "isoDate": "2026-09-24 00:00:00", "green": 4, "red": 5, "calories": 2300 } ] } ] }
+```
+
+`POST /api/coaches`: `{ "syncId", "name", "email", "disabled"? }`. This route
+never creates or edits administrators. If the email already belongs to an
+account that is not linked to this Sync ID, the request is rejected, not
+merged. A new coach sets a password with **Forgot password** on the sign-in
+page, or an admin can use **Resend invite**.
+
+`POST /api/families`:
+`{ "label", "coachSyncId"?, "active"?, "parent": { "syncId", "name", "goals"? }, "child": { … } }`.
+If both Sync IDs are new, a family is created. If both already belong to the
+same family, as parent and child, that family is updated. Any other
+combination is a 409. The response includes `accessCode`, the code the
+family signs in with. Goals are changed only when they are sent.
+
+```bash
+curl -H "X-API-Key: $KEY" https://traffic-light-food-tracker.web.app/api/data/1234abcd
+curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"label":"Smith family","coachSyncId":"c-01","parent":{"syncId":"p-01","name":"J.S."},"child":{"syncId":"k-01","name":"A.S."}}' \
+  https://traffic-light-food-tracker.web.app/api/families
+```
 
 ---
 

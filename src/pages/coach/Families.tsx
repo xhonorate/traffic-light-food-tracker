@@ -5,6 +5,8 @@ import {
   createFamily,
   deleteFamily,
   regenerateCode,
+  saveFamilyDetails,
+  setSyncId,
   subscribeFamilies,
   updateFamily,
 } from "../../lib/data";
@@ -18,6 +20,7 @@ import {
   resolveGoals,
   type FamilyDoc,
   type MemberGoals,
+  type MemberId,
 } from "../../lib/types";
 import { Layout } from "../../components/Layout";
 import {
@@ -76,7 +79,9 @@ export default function Families() {
         f.label.toLowerCase().includes(q) ||
         f.code.toLowerCase().includes(q) ||
         f.members.parent?.name?.toLowerCase().includes(q) ||
-        f.members.child?.name?.toLowerCase().includes(q),
+        f.members.child?.name?.toLowerCase().includes(q) ||
+        f.members.parent?.syncId?.toLowerCase().includes(q) ||
+        f.members.child?.syncId?.toLowerCase().includes(q),
     );
   }, [families, query]);
 
@@ -103,7 +108,7 @@ export default function Families() {
         <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by name or code"
+          placeholder="Search by name, code or Sync ID"
           className="sm:max-w-xs"
         />
         <Button
@@ -169,7 +174,12 @@ export default function Families() {
                           : "Not signed in yet"}
                       </p>
                     </div>
-                    {!f.active && <Badge tone="warn">Paused</Badge>}
+                    <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                      {!f.active && <Badge tone="warn">Paused</Badge>}
+                      {MEMBER_IDS.some((m) => !f.members[m]?.syncId) && (
+                        <Badge tone="warn">Missing Sync ID</Badge>
+                      )}
+                    </div>
                   </div>
 
                   <ul className="mt-3 space-y-2">
@@ -228,6 +238,7 @@ export default function Families() {
       {adding && (
         <FamilyFormModal
           open
+          syncIdsEditable
           onClose={() => setAdding(false)}
           onSubmit={async (v) => {
             const { data } = await createFamily(v);
@@ -240,15 +251,22 @@ export default function Families() {
         <FamilyFormModal
           open
           initial={editing}
+          syncIdsEditable={isAdmin}
           onClose={() => setEditing(null)}
           onSubmit={async (v) => {
-            await updateFamily(editing.id, {
-              label: v.label,
-              members: {
-                parent: v.parent,
-                child: v.child,
-              },
-            });
+            await saveFamilyDetails(editing.id, v);
+            // Sync IDs go through the server, which checks they are unique.
+            if (isAdmin) {
+              for (const m of MEMBER_IDS) {
+                const next = v[m].syncId;
+                if (next && next !== (editing.members[m]?.syncId ?? "")) {
+                  await setSyncId({
+                    syncId: next,
+                    target: { kind: "member", familyId: editing.id, memberId: m },
+                  });
+                }
+              }
+            }
             setToast("Family updated");
           }}
           onRegenerate={async () => {
@@ -344,6 +362,8 @@ function GoalSummaryChips({ goals }: { goals: MemberGoals }) {
   );
 }
 
+const MEMBER_IDS: MemberId[] = ["parent", "child"];
+
 /** The three daily targets, in the order coaches read them: aim for, stay under. */
 const GOAL_FIELDS = [
   { key: "dailyGreen" as const, label: "Green", hint: "at least" },
@@ -353,8 +373,8 @@ const GOAL_FIELDS = [
 
 interface FamilyFormValues {
   label: string;
-  parent: { name: string; goals: MemberGoals };
-  child: { name: string; goals: MemberGoals };
+  parent: { name: string; goals: MemberGoals; syncId: string };
+  child: { name: string; goals: MemberGoals; syncId: string };
 }
 
 function FamilyFormModal({
@@ -362,6 +382,7 @@ function FamilyFormModal({
   onClose,
   onSubmit,
   initial,
+  syncIdsEditable = false,
   onRegenerate,
   onToggleActive,
 }: {
@@ -369,6 +390,8 @@ function FamilyFormModal({
   onClose: () => void;
   onSubmit: (v: FamilyFormValues) => Promise<void>;
   initial?: FamilyDoc;
+  /** Sync IDs are required when creating; afterwards only admins change them. */
+  syncIdsEditable?: boolean;
   onRegenerate?: () => Promise<void>;
   onToggleActive?: () => Promise<void>;
 }) {
@@ -378,6 +401,12 @@ function FamilyFormModal({
   );
   const [childName, setChildName] = useState(
     initial?.members.child?.name ?? "",
+  );
+  const [parentSyncId, setParentSyncId] = useState(
+    initial?.members.parent?.syncId ?? "",
+  );
+  const [childSyncId, setChildSyncId] = useState(
+    initial?.members.child?.syncId ?? "",
   );
 
   // Goals are edited as strings so a half-typed number does not snap back.
@@ -405,7 +434,18 @@ function FamilyFormModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const invalid = !label.trim() || !parentName.trim() || !childName.trim();
+  // A Sync ID may only be left blank on an older family that never had one.
+  const syncMissing = (m: MemberId, v: string) =>
+    syncIdsEditable && !v.trim() && (!initial || Boolean(initial.members[m]?.syncId));
+  const syncClash =
+    Boolean(parentSyncId.trim()) && parentSyncId.trim() === childSyncId.trim();
+  const invalid =
+    !label.trim() ||
+    !parentName.trim() ||
+    !childName.trim() ||
+    syncMissing("parent", parentSyncId) ||
+    syncMissing("child", childSyncId) ||
+    syncClash;
 
   const submit = async () => {
     if (invalid) return;
@@ -414,8 +454,16 @@ function FamilyFormModal({
     try {
       await onSubmit({
         label: label.trim(),
-        parent: { name: parentName.trim(), goals: toGoals(parentGoals) },
-        child: { name: childName.trim(), goals: toGoals(childGoals) },
+        parent: {
+          name: parentName.trim(),
+          goals: toGoals(parentGoals),
+          syncId: parentSyncId.trim(),
+        },
+        child: {
+          name: childName.trim(),
+          goals: toGoals(childGoals),
+          syncId: childSyncId.trim(),
+        },
       });
       onClose();
     } catch (e) {
@@ -448,6 +496,9 @@ function FamilyFormModal({
     >
       <div className="space-y-4">
         {error && <Banner tone="error">{error}</Banner>}
+        {syncClash && (
+          <Banner tone="error">The parent and child need different Sync IDs.</Banner>
+        )}
 
         <Field
           label="Family name or identifier"
@@ -468,6 +519,8 @@ function FamilyFormModal({
               title: "Parent",
               name: parentName,
               setName: setParentName,
+              syncId: parentSyncId,
+              setSyncId: setParentSyncId,
               goals: parentGoals,
               setGoals: setParentGoals,
             },
@@ -476,6 +529,8 @@ function FamilyFormModal({
               title: "Child",
               name: childName,
               setName: setChildName,
+              syncId: childSyncId,
+              setSyncId: setChildSyncId,
               goals: childGoals,
               setGoals: setChildGoals,
             },
@@ -495,6 +550,27 @@ function FamilyFormModal({
                 placeholder={m.key === "parent" ? "e.g. J.S." : "e.g. A.S."}
               />
             </Field>
+            <div className="mt-3">
+              <Field
+                label="Sync ID"
+                required={syncIdsEditable}
+                hint={
+                  syncIdsEditable
+                    ? "From the external platform. Links this person across systems."
+                    : "Only an administrator can change this"
+                }
+              >
+                <Input
+                  value={m.syncId}
+                  onChange={(e) => m.setSyncId(e.target.value)}
+                  disabled={!syncIdsEditable}
+                  placeholder={syncIdsEditable ? "e.g. 1234abcd" : "Not linked yet"}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="font-mono"
+                />
+              </Field>
+            </div>
             <p className="mt-3 mb-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
               Daily goals
             </p>
