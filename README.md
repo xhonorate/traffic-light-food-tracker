@@ -405,11 +405,19 @@ the newest day comes first.
               "days": [ { "isoDate": "2026-09-24 00:00:00", "green": 4, "red": 5, "calories": 2300 } ] } ] }
 ```
 
-`POST /api/coaches`: `{ "syncId", "name", "email", "disabled"? }`. This route
-never creates or edits administrators. If the email already belongs to an
-account that is not linked to this Sync ID, the request is rejected, not
-merged. A new coach sets a password with **Forgot password** on the sign-in
-page, or an admin can use **Resend invite**.
+`POST /api/coaches`: `{ "syncId", "name", "email", "disabled"?, "sendInvite"? }`.
+A new coach gets the same password-setup email that the Coaches screen sends
+(pass `"sendInvite": false` to skip it). For an existing coach,
+`"sendInvite": true` sends the email again. `inviteSent` in the response says
+whether it went out. This route
+never creates or edits administrators. If a coach or admin who already has
+dashboard access uses the email but is not linked to this Sync ID, the request
+is rejected, not merged. A login with no dashboard access, such as someone who
+tried "Sign in with Google" before being added, does not block creation: it is
+taken over and becomes the coach's login. If that login has a password the
+owner never verified, the password is replaced, because anyone can register an
+unverified address. All of its existing sessions are signed out. The invite
+email then lets the real owner set their own password.
 
 `POST /api/families`:
 `{ "label", "coachSyncId"?, "active"?, "parent": { "syncId", "name", "goals"? }, "child": { … } }`.

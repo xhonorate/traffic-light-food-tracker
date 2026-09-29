@@ -57,6 +57,11 @@ export default function Families() {
   const [query, setQuery] = useState("");
 
   const isAdmin = claims?.role === "admin";
+  // Only an administrator can open a coach account, so a coach session that
+  // is a "view as" session always has an admin behind it -- and the server
+  // lets that admin keep changing Sync IDs.
+  const canEditSyncIds =
+    isAdmin || (claims?.role === "coach" && Boolean(claims.impersonatedBy));
   const { nav, base } = chromeFor(claims?.role);
 
   useEffect(() => {
@@ -251,12 +256,12 @@ export default function Families() {
         <FamilyFormModal
           open
           initial={editing}
-          syncIdsEditable={isAdmin}
+          syncIdsEditable={canEditSyncIds}
           onClose={() => setEditing(null)}
           onSubmit={async (v) => {
             await saveFamilyDetails(editing.id, v);
             // Sync IDs go through the server, which checks they are unique.
-            if (isAdmin) {
+            if (canEditSyncIds) {
               for (const m of MEMBER_IDS) {
                 const next = v[m].syncId;
                 if (next && next !== (editing.members[m]?.syncId ?? "")) {

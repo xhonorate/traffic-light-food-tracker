@@ -147,16 +147,27 @@ paths:
       description: |
         The coach is identified by `syncId`:
 
-        - **New Sync ID:** a coach account is created. There is no password
-          yet. The coach sets one using "Forgot password" on the sign-in
-          page, or an administrator can send an invite from the app.
+        - **New Sync ID:** a coach account is created and the coach is
+          emailed a link to set their password. This is the same invite an
+          administrator sends from the app. Set `sendInvite: false` to skip
+          the email.
         - **Existing Sync ID:** that coach's name, email and (if sent)
-          `disabled` flag are updated.
+          `disabled` flag are updated. No email is sent unless
+          `sendInvite: true`, which resends the invite (for example, if the
+          coach lost the first one or the link expired).
+
+        `inviteSent` in the response reports whether the email went out. If
+        it is false after you requested one, the account is still
+        saved. Retry with `sendInvite: true`.
 
         This route never creates, edits or links administrator accounts. If
-        the email already belongs to an account that is not linked to this
-        Sync ID, the request fails with 409. An administrator must link the
-        two in the app.
+        a coach or administrator who already has dashboard access uses the
+        email but is not linked to this Sync ID, the request fails with 409.
+        An administrator must link the two in the app.
+
+        A sign-in with no dashboard access (for example, someone who tried
+        "Sign in with Google" before being added) does not block creation. It
+        becomes the new coach's sign-in and `created` is true.
       requestBody:
         required: true
         content:
@@ -164,15 +175,15 @@ paths:
             schema: { $ref: "#/components/schemas/CoachInput" }
             example:
               syncId: "c-9f2e41"
-              name: "Alex Rivera"
-              email: "alex@example.org"
+              name: "Test Coach"
+              email: "testcoach@example.org"
       responses:
         "200":
           description: Created or updated
           content:
             application/json:
               schema: { $ref: "#/components/schemas/CoachUpsertResponse" }
-              example: { errorMessage: null, syncId: "c-9f2e41", created: true }
+              example: { errorMessage: null, syncId: "c-9f2e41", created: true, inviteSent: true }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
@@ -182,8 +193,9 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "409":
           description: |
-            The Sync ID belongs to a family member, or the email is used by
-            a different account.
+            The Sync ID belongs to a family member; the email belongs to a
+            coach or administrator who already has dashboard access; or, on
+            update, the new email is already used by another sign-in.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -510,25 +522,37 @@ components:
       required: [syncId, name, email]
       properties:
         syncId: { $ref: "#/components/schemas/SyncId" }
-        name: { type: string, maxLength: 120, example: "Alex Rivera" }
+        name: { type: string, maxLength: 120, example: "Test Coach" }
         email:
           type: string
           format: email
           description: The coach's sign-in email. Stored in lowercase.
-          example: "alex@example.org"
+          example: "testcoach@example.org"
         disabled:
           type: boolean
           description: If true, the coach cannot use the app. If left out, the current value is kept (false for a new coach).
+        sendInvite:
+          type: boolean
+          description: |
+            Whether to email the coach a link to set their password. If left
+            out, the email is sent when a coach is created and not sent when
+            one is updated. Set to true to resend it to an existing coach.
 
     CoachUpsertResponse:
       type: object
-      required: [errorMessage, syncId, created]
+      required: [errorMessage, syncId, created, inviteSent]
       properties:
         errorMessage: { type: string, nullable: true, example: null }
         syncId: { $ref: "#/components/schemas/SyncId" }
         created:
           type: boolean
           description: true if a new coach was created, false if an existing one was updated.
+        inviteSent:
+          type: boolean
+          description: |
+            Whether the password-setup email was sent. false if it was not
+            requested, or if sending failed (the account change is still
+            saved; retry with sendInvite: true).
 
     CoachDeleteResponse:
       type: object

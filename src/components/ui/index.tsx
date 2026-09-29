@@ -203,9 +203,15 @@ export function Modal({
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
+  // Callers pass inline closures, so onClose changes on every parent render.
+  // Keeping it out of the effect's deps stops each of those renders from
+  // re-running the effect, which pulled focus off whatever field was active.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCloseRef.current(); };
     document.addEventListener("keydown", onKey);
     // Prevent the page behind the sheet from scrolling on mobile.
     const prev = document.body.style.overflow;
@@ -215,7 +221,7 @@ export function Modal({
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
@@ -223,7 +229,10 @@ export function Modal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-      <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+      {/* No backdrop blur: a full-screen blur is recomputed on every repaint
+          of the dialog (each keystroke, the caret, a spinning loader), which
+          made typing in forms lag on slower phones and laptops. */}
+      <div className="absolute inset-0 bg-slate-900/60" onClick={onClose} aria-hidden="true" />
       <div
         ref={ref}
         role="dialog"

@@ -7,8 +7,8 @@
  * API the external platform (3C) uses to roster people and read their data.
  */
 
-import { initializeApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
+import { applicationDefault, initializeApp } from "firebase-admin/app";
+import { getAuth, type UserRecord } from "firebase-admin/auth";
 import {
   getFirestore, type DocumentReference, type DocumentSnapshot, type Query, type Transaction,
 } from "firebase-admin/firestore";
@@ -85,6 +85,18 @@ function requireRole(req: CallableRequest, ...roles: Role[]): Caller {
     throw new HttpsError("permission-denied", "You do not have access to do that.");
   }
   return caller;
+}
+
+/**
+ * Whether the human behind this session is an administrator. An admin keeps
+ * admin authority while viewing as a coach; being more restricted there than
+ * when signed in directly is surprising and gets in the way.
+ */
+async function actsAsAdmin(caller: Caller): Promise<boolean> {
+  const root = rootActor(caller);
+  if (root === caller.uid) return caller.role === "admin";
+  const rootSnap = await db.doc(`users/${root}`).get();
+  return rootSnap.data()?.role === "admin";
 }
 
 /** Reject an account an admin has switched off, even mid-session. */
@@ -296,39 +308,99 @@ async function createStaffAccount(input: NewStaff): Promise<{ uid: string; email
   const { email, name, role, syncId } = input;
   if (syncId) await assertSyncIdsFree([{ syncId, owner: { kind: "staff", uid: "" } }]);
 
-  let uid: string;
-  try {
-    // No password is set here. The client follows up with Firebase Auth's own
-    // password-reset email, which is how the coach chooses their own.
-    const user = await auth.createUser({ email, displayName: name, emailVerified: false });
-    uid = user.uid;
-  } catch (e) {
-    if ((e as { code?: string }).code === "auth/email-already-exists") {
-      throw new HttpsError("already-exists", "An account with that email already exists.");
-    }
+  // A login for this email may already exist without dashboard access --
+  // typically someone who tried "Sign in with Google" before being added.
+  // That is not a conflict: take the login over rather than refuse. Only a
+  // `users` profile means the person really has an account here already.
+  const existing = await auth.getUserByEmail(email).catch((e) => {
+    if ((e as { code?: string }).code === "auth/user-not-found") return null;
     throw e;
+  });
+  if (existing && (await db.doc(`users/${existing.uid}`).get()).exists) {
+    throw new HttpsError(
+      "already-exists",
+      "An account with that email already has dashboard access.",
+    );
   }
 
+  let uid: string;
+  if (existing) {
+    uid = existing.uid;
+    await secureAdoptedLogin(existing);
+  } else {
+    try {
+      // No password is set here. The client follows up with Firebase Auth's own
+      // password-reset email, which is how the coach chooses their own.
+      const user = await auth.createUser({ email, displayName: name, emailVerified: false });
+      uid = user.uid;
+    } catch (e) {
+      // Created in the moment since the lookup above. Rare enough to just ask
+      // for a retry, which will take the new login over.
+      if ((e as { code?: string }).code === "auth/email-already-exists") {
+        throw new HttpsError("aborted", "That email was registered at the same moment. Try again.");
+      }
+      throw e;
+    }
+  }
+
+  const userRef = db.doc(`users/${uid}`);
+  let committed = false;
   try {
-    await auth.setCustomUserClaims(uid, { role });
     await db.runTransaction(async (tx) => {
       const claims = syncId ? [{ syncId, owner: { kind: "staff" as const, uid } }] : [];
       if (syncId) await assertSyncIdsFree(claims, tx);
-      tx.set(db.doc(`users/${uid}`), {
+      // Re-checked inside the transaction so two requests cannot both take
+      // over the same login.
+      if ((await tx.get(userRef)).exists) {
+        throw new HttpsError("already-exists", "An account with that email already has dashboard access.");
+      }
+      tx.set(userRef, {
         email, name, role, disabled: input.disabled === true,
         createdAt: Date.now(), lastLoginAt: null,
         ...(syncId ? { syncId } : {}),
       });
       if (syncId) tx.set(syncRef(syncId), { kind: "staff", uid, createdAt: Date.now() });
     });
+    committed = true;
+    await auth.setCustomUserClaims(uid, { role });
+    if (existing) await auth.updateUser(uid, { displayName: name });
   } catch (e) {
-    // Lost a race for the Sync ID: do not leave a half-made login behind.
-    await auth.deleteUser(uid).catch(() => undefined);
+    // Undo only what this call wrote. If the transaction itself failed, the
+    // profile there (if any) belongs to someone else and must stay.
+    if (committed) {
+      const batch = db.batch();
+      batch.delete(userRef);
+      if (syncId) batch.delete(syncRef(syncId));
+      await batch.commit().catch(() => undefined);
+    }
+    // A login this call created goes too; one it took over is left in place.
+    if (!existing) await auth.deleteUser(uid).catch(() => undefined);
     throw e;
   }
 
-  logger.info("Account created", { uid, email, role, syncId });
+  logger.info("Account created", { uid, email, role, syncId, adoptedExistingLogin: Boolean(existing) });
   return { uid, email };
+}
+
+/**
+ * Make a login that predates the account safe to grant access to.
+ *
+ * Anyone can register an email/password login for an address they do not
+ * own -- Firebase does not check until the address is verified. If we simply
+ * gave coach access to such a login, whoever registered it first would be
+ * signed in as the coach. So an unverified password is replaced with a random
+ * one nobody knows; the real coach sets their own through the normal invite
+ * or "Forgot password" email. Google and verified logins are kept: they prove
+ * ownership of the address. Existing sessions are revoked either way.
+ */
+async function secureAdoptedLogin(user: UserRecord): Promise<void> {
+  const hasPassword = user.providerData.some((p) => p.providerId === "password");
+  if (hasPassword && !user.emailVerified) {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    await auth.updateUser(user.uid, { password: Buffer.from(bytes).toString("base64url") });
+  }
+  await auth.revokeRefreshTokens(user.uid);
 }
 
 export const createCoach = onCall(async (req) => {
@@ -474,7 +546,12 @@ export const createFamily = onCall(async (req) => {
  * mistyped ID gets corrected. The old ID is released in the same transaction.
  */
 export const setSyncId = onCall(async (req) => {
-  requireRole(req, "admin");
+  const caller = requireRole(req, "admin", "coach");
+  if (!(await actsAsAdmin(caller))) {
+    throw new HttpsError("permission-denied", "Only administrators can change a Sync ID.");
+  }
+  // The human behind a "view as" session must still be active too.
+  await assertEnabled(rootActor(caller));
   const syncId = readSyncId(req.data?.syncId, "Sync ID");
   const target = req.data?.target as Record<string, unknown> | undefined;
 
@@ -647,9 +724,7 @@ export const impersonate = onCall(async (req) => {
     );
   }
 
-  // An admin keeps admin authority even while viewing as a coach.
-  const rootSnap = root === caller.uid ? null : await db.doc(`users/${root}`).get();
-  const rootIsAdmin = rootSnap ? rootSnap.data()?.role === "admin" : caller.role === "admin";
+  const rootIsAdmin = await actsAsAdmin(caller);
 
   const type = req.data?.type;
   const id = str(req.data?.id, "Target id");
@@ -1093,15 +1168,18 @@ async function coachUidFor(syncId: string): Promise<string> {
 /**
  * Create a coach, or update the one already linked to this Sync ID.
  *
- * Never links by email: an existing account with the same address but no
- * Sync ID is reported as a conflict, for an admin to link in the app.
- * Administrators are out of reach of this route entirely.
+ * Never links by email: an existing coach or admin profile with the same
+ * address but no Sync ID is reported as a conflict, for an admin to link in
+ * the app. A bare login with no profile (someone who tried to sign in before
+ * being added) is not a conflict and is taken over. Administrators are out of
+ * reach of this route entirely.
  */
 async function apiUpsertCoach(body: Body) {
   const syncId = readSyncId(body.syncId, "syncId");
   const name = str(body.name, "name", 120);
   const email = readEmail(body.email, "email");
   const disabled = optionalBool(body.disabled, "disabled");
+  const sendInvite = optionalBool(body.sendInvite, "sendInvite");
 
   const owner = (await syncRef(syncId).get()).data() as SyncOwner | undefined;
   if (!owner) {
@@ -1111,13 +1189,16 @@ async function apiUpsertCoach(body: Body) {
       if (e instanceof HttpsError && e.code === "already-exists" && e.message.includes("email")) {
         throw new HttpsError(
           "already-exists",
-          "An account with that email already exists but is not linked to this Sync ID. " +
-          "An administrator can link it from the Coaches page.",
+          "A coach or administrator with that email already has dashboard access but is not " +
+          "linked to this Sync ID. An administrator can link it from the Coaches page.",
         );
       }
       throw e;
     }
-    return { syncId, created: true };
+    // Same invite the Coaches screen sends, so a new coach can choose a
+    // password. Opt out with sendInvite: false.
+    const inviteSent = sendInvite === false ? false : await sendPasswordSetupEmail(email);
+    return { syncId, created: true, inviteSent };
   }
   if (owner.kind !== "staff") {
     throw new HttpsError("already-exists", `Sync ID ${syncId} belongs to a family member.`);
@@ -1143,8 +1224,48 @@ async function apiUpsertCoach(body: Body) {
   }
   await userRef.update({ name, email, ...(disabled === undefined ? {} : { disabled }) });
 
-  logger.info("Coach updated via API", { uid: owner.uid, syncId });
-  return { syncId, created: false };
+  // An existing coach is only emailed on request -- the "Resend invite"
+  // button, for 3C.
+  const inviteSent = sendInvite === true ? await sendPasswordSetupEmail(email) : false;
+
+  logger.info("Coach updated via API", { uid: owner.uid, syncId, inviteSent });
+  return { syncId, created: false, inviteSent };
+}
+
+/**
+ * Send Firebase Auth's password-reset email, which doubles as the coach
+ * invite. It is the same email, from the same template, that the Coaches
+ * screen sends from the browser with `sendPasswordResetEmail`.
+ *
+ * The Admin SDK can only *generate* that link, not send it, so this calls the
+ * Identity Toolkit endpoint the SDK itself uses, authenticated as the
+ * functions' service account, and leaves out `returnOobLink` so Firebase
+ * delivers the email. Returns whether it was sent; a failure never undoes
+ * the account, matching the Coaches screen, which reports it and offers
+ * "Resend invite".
+ */
+async function sendPasswordSetupEmail(email: string): Promise<boolean> {
+  try {
+    const projectId = process.env.GCLOUD_PROJECT
+      || (JSON.parse(process.env.FIREBASE_CONFIG || "{}") as { projectId?: string }).projectId;
+    if (!projectId) throw new Error("project id unavailable");
+
+    const { access_token: token } = await applicationDefault().getAccessToken();
+    const r = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/projects/${projectId}/accounts:sendOobCode`,
+      {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requestType: "PASSWORD_RESET", email }),
+      },
+    );
+    if (!r.ok) throw new Error(`status ${r.status}: ${(await r.text()).slice(0, 300)}`);
+    logger.info("Invite email sent", { email });
+    return true;
+  } catch (e) {
+    logger.error("Invite email failed", { email, error: (e as Error).message });
+    return false;
+  }
 }
 
 /**

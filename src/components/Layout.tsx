@@ -102,7 +102,7 @@ export function Layout({
     <div className="flex min-h-dvh flex-col">
       <ImpersonationBanner />
 
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90">
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 dark:border-slate-800 dark:bg-slate-950/95">
         <div className="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4">
           <Logo className="text-slate-900 dark:text-slate-100" />
           <span className="hidden text-xs text-slate-400 sm:inline dark:text-slate-500">{roleLabel}</span>
@@ -152,7 +152,7 @@ export function Layout({
 
       {/* Mobile bottom nav */}
       {nav.length > 1 && (
-        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 backdrop-blur sm:hidden dark:border-slate-800 dark:bg-slate-950/95"
+        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/95 sm:hidden dark:border-slate-800 dark:bg-slate-950/95"
           style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
           <div className="flex">
             {nav.map((item) => (
