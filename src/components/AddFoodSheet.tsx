@@ -3,10 +3,12 @@ import {
   lazy,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import { classify } from "../lib/rules";
+import type { FoodGroup } from "../lib/foodGroups";
 import {
   PORTION_OPTIONS,
   customFood,
@@ -22,6 +24,8 @@ import {
   MEALS,
   type FoodFacts,
   type Meal,
+  type Classification,
+  type EntryColor,
   type QuickFood,
   type RuleSet,
   type TrafficColor,
@@ -44,8 +48,10 @@ export interface AddFoodPayload {
   original: FoodFacts;
   servings: number;
   meal: Meal;
-  color: TrafficColor;
-  autoColor: TrafficColor;
+  color: EntryColor;
+  /** `null` when the guide gives no verdict and the family's choice stood. */
+  autoColor: EntryColor | null;
+  group: FoodGroup | null;
   reasons: string[];
   overridden: boolean;
 }
@@ -133,18 +139,24 @@ export default function AddFoodSheet({
     }
   };
 
+  // The guide judges a food at its own serving, so the portion chosen never
+  // changes the verdict.
+  const verdict = useMemo(() => (facts ? classify(facts, rules) : null), [facts, rules]);
+
   /**
    * Requirement 11 option 2. The family commits to a color, then the engine
    * responds: agreement is affirmed, disagreement is questioned but never
-   * enforced. Their answer is always what gets logged.
+   * enforced. Their answer is always what gets logged. Where the guide has no
+   * verdict (a combination food, a group it cannot tell) there is nothing to
+   * question, and a "no color" food is logged without asking at all.
    */
-  const submit = async (finalColor: TrafficColor, forced = false) => {
-    if (!facts) return;
+  const submit = async (finalColor: EntryColor, forced = false) => {
+    if (!facts || !verdict) return;
     const scaled: FoodFacts = { ...facts, serv: nutritionFor(facts, servings) };
-    const verdict = classify(facts, rules);
+    const disagrees = verdict.color !== null && finalColor !== verdict.color;
 
-    if (!forced && finalColor !== verdict.color) {
-      setChallenge({ auto: verdict.color, reasons: verdict.reasons });
+    if (!forced && disagrees && verdict.color !== "none" && finalColor !== "none") {
+      setChallenge({ auto: verdict.color as TrafficColor, reasons: verdict.reasons });
       return;
     }
 
@@ -158,8 +170,9 @@ export default function AddFoodSheet({
         meal,
         color: finalColor,
         autoColor: verdict.color,
+        group: verdict.group,
         reasons: verdict.reasons,
-        overridden: finalColor !== verdict.color,
+        overridden: disagrees,
       });
       onClose();
     } catch (e) {
@@ -243,10 +256,11 @@ export default function AddFoodSheet({
         />
       )}
 
-      {step === "detail" && facts && (
+      {step === "detail" && facts && verdict && (
         <DetailStep
           resolving={resolving}
           facts={facts}
+          verdict={verdict}
           servings={servings}
           setServings={(n) => {
             setServings(n);
@@ -573,6 +587,7 @@ function CustomStep({
 function DetailStep({
   resolving,
   facts,
+  verdict,
   servings,
   setServings,
   meal,
@@ -587,6 +602,7 @@ function DetailStep({
 }: {
   resolving: boolean;
   facts: FoodFacts;
+  verdict: Classification;
   servings: number;
   setServings: (n: number) => void;
   meal: Meal;
@@ -597,9 +613,10 @@ function DetailStep({
   saving: boolean;
   foodGuideUrl: string;
   onBack: () => void;
-  onSubmit: (color: TrafficColor, forced?: boolean) => void;
+  onSubmit: (color: EntryColor, forced?: boolean) => void;
 }) {
   const n = nutritionFor(facts, servings);
+  const noColor = verdict.color === "none";
 
   return (
     <div className="space-y-4">
@@ -692,15 +709,37 @@ function DetailStep({
         </div>
       </div>
 
-      <div>
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-            What color do you think this is?
-          </span>
-          <ColorWordHelp foodGuideUrl={foodGuideUrl} />
+      {noColor ? (
+        // Nothing to guess: the guide gives water, plain tea and coffee, and
+        // seasonings no color, and they count toward no total.
+        <div className="flex items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
+          <ColorMark color="none" size={26} />
+          <div className="min-w-0">
+            <p className="font-semibold text-slate-800 dark:text-slate-100">No color</p>
+            <p className="mt-0.5 text-sm text-slate-600 dark:text-slate-300">
+              Water, plain tea and coffee, and seasonings have no traffic-light
+              color. It is logged, but not counted as green, yellow or red.
+            </p>
+          </div>
         </div>
-        <ColorPicker value={guess} onChange={setGuess} disabled={saving} />
-      </div>
+      ) : (
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
+              What color do you think this is?
+            </span>
+            <ColorWordHelp foodGuideUrl={foodGuideUrl} />
+          </div>
+          {verdict.group === "combo" && verdict.color === null && (
+            <p className="mb-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+              A mixed dish is red if it has a full serving of a red food in it,
+              like cheese, pepperoni or anything fried. Otherwise it is yellow.
+              You decide.
+            </p>
+          )}
+          <ColorPicker value={guess} onChange={setGuess} disabled={saving} />
+        </div>
+      )}
 
       {/* The engine only speaks up after a guess has been made. */}
       {challenge && guess && (
@@ -761,8 +800,8 @@ function DetailStep({
             variant="primary"
             full
             loading={saving}
-            disabled={!guess}
-            onClick={() => guess && onSubmit(guess)}
+            disabled={!guess && !noColor}
+            onClick={() => (noColor ? onSubmit("none") : guess && onSubmit(guess))}
           >
             Add to log
           </Button>

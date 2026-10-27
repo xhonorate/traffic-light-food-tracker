@@ -2,6 +2,7 @@ import { httpsCallable } from "firebase/functions";
 import { functions } from "./firebase";
 import type { FoodFacts, Nutrients } from "./types";
 import { EMPTY_NUTRIENTS } from "./types";
+import { customFoodTags } from "./foodTags";
 
 /**
  * Food lookup goes through Cloud Functions rather than straight from the
@@ -119,13 +120,16 @@ export function customFood(input: CustomFoodInput): FoodFacts {
   return {
     name: input.name.trim(),
     brand: "Custom entry",
-    cats: input.isBeverage ? ["en:beverages"] : [],
+    cats: customFoodTags(input.name, input.isBeverage),
     isBeverage: input.isBeverage,
     per100: { ...EMPTY_NUTRIENTS },
     serv,
     servingLabel: input.servingLabel.trim() || "1 serving",
     source: "Custom entry",
     code: "",
+    usdaCategory: "",
+    sweetened: false,
+    servQtyG: null,
   };
 }
 

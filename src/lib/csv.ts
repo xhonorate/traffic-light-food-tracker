@@ -61,7 +61,7 @@ export function summarise(
       byKey.set(key, row);
     }
     if (e.kcal !== null && e.kcal !== undefined) row.kcal = (row.kcal ?? 0) + e.kcal;
-    row[e.color] += e.servings;
+    if (e.color !== "none") row[e.color] += e.servings;
   }
   return [...byKey.values()].sort(
     (a, b) => a.date.localeCompare(b.date) || a.memberId.localeCompare(b.memberId),
@@ -115,7 +115,8 @@ export function entriesCsv(
       e.brand,
       e.servings,
       e.color,
-      e.autoColor,
+      // Blank when the guide gave no verdict (combination foods).
+      e.autoColor ?? "",
       e.overridden ? "yes" : "no",
       e.kcal === null ? "" : Math.round(e.kcal),
       cellNum(e.fat),

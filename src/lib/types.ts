@@ -1,13 +1,20 @@
 /** Shared domain types for the Traffic Light Food Tracker. */
 
+import type { FoodGroup } from "./foodGroups";
+
 export type TrafficColor = "green" | "yellow" | "red";
+
+/** What a logged food can be: one of the three colors, or the guide's "no
+ *  color" for water, plain tea/coffee and seasonings. A "none" entry counts
+ *  toward no color total and no goal. */
+export type EntryColor = TrafficColor | "none";
 
 export type Role = "admin" | "coach" | "family";
 
 export type MemberId = "parent" | "child";
 
-/** Nutrient block. `null` means "unknown", which the rule engine treats
- *  differently from zero -- see `Condition.whenMissing`. */
+/** Nutrient block. `null` means "unknown", never zero: a food with unknown
+ *  calories gets no verdict rather than a guessed one. */
 export interface Nutrients {
   kcal: number | null;
   fat: number | null;
@@ -34,92 +41,66 @@ export interface FoodFacts {
   servingLabel: string;
   source: string;
   code: string;
+  /** USDA's own food category ("Dairy and Egg Products"), which food-group
+   *  detection reads. Empty for other sources; absent on foods saved before
+   *  it was recorded. */
+  usdaCategory?: string;
+  /** The ingredient list names an artificial sweetener, which makes a drink
+   *  red whatever its calories (FRG p.2). */
+  sweetened?: boolean;
+  /** Grams in the label serving, when the label states one. */
+  servQtyG?: number | null;
 }
 
 // ---------------------------------------------------------------------------
-// Declarative rule engine
+// Rules: the guide's food-group table
 // ---------------------------------------------------------------------------
 
-/** Every numeric field a rule can test. `*_100` is per 100g/ml (density),
- *  `*_serv` is per labelled serving. */
-export type NumericField =
-  | "kcal_100" | "fat_100" | "sat_100" | "sugars_100" | "added_100" | "protein_100"
-  | "kcal_serv" | "fat_serv" | "sat_serv" | "sugars_serv" | "added_serv" | "protein_serv";
+/**
+ * How a group's color is decided.
+ *  - `graded`    : calories in one serving against the group's lines
+ *  - `alwaysRed` : red whatever the calories (juice, fats/oils/sweets)
+ *  - `free`      : no color at all (water, plain tea/coffee, seasonings)
+ *  - `combo`     : no calorie range; the family's own choice stands
+ */
+export type GroupKind = "graded" | "alwaysRed" | "free" | "combo";
 
-export const NUMERIC_FIELDS: { value: NumericField; label: string; unit: string }[] = [
-  { value: "kcal_100", label: "Calories per 100g/ml", unit: "kcal" },
-  { value: "fat_100", label: "Total fat per 100g/ml", unit: "g" },
-  { value: "sat_100", label: "Saturated fat per 100g/ml", unit: "g" },
-  { value: "sugars_100", label: "Total sugars per 100g/ml", unit: "g" },
-  { value: "added_100", label: "Added sugar per 100g/ml", unit: "g" },
-  { value: "protein_100", label: "Protein per 100g/ml", unit: "g" },
-  { value: "kcal_serv", label: "Calories per serving", unit: "kcal" },
-  { value: "fat_serv", label: "Total fat per serving", unit: "g" },
-  { value: "sat_serv", label: "Saturated fat per serving", unit: "g" },
-  { value: "sugars_serv", label: "Total sugars per serving", unit: "g" },
-  { value: "added_serv", label: "Added sugar per serving", unit: "g" },
-  { value: "protein_serv", label: "Protein per serving", unit: "g" },
-];
-
-export type NumericOp = ">=" | ">" | "<=" | "<" | "==";
-
-export const NUMERIC_OPS: { value: NumericOp; label: string }[] = [
-  { value: ">=", label: "is at least (\u2265)" },
-  { value: ">", label: "is more than (>)" },
-  { value: "<=", label: "is at most (\u2264)" },
-  { value: "<", label: "is less than (<)" },
-  { value: "==", label: "equals (=)" },
-];
-
-/** What to do when the tested nutrient is unknown for this food.
- *  - `skip`  : the condition fails, so the rule does not fire (safest default)
- *  - `treatAsZero` : substitute 0 and carry on comparing
- *  - `pass`  : the condition succeeds regardless */
-export type MissingPolicy = "skip" | "treatAsZero" | "pass";
-
-export type Condition =
-  | { kind: "numeric"; field: NumericField; op: NumericOp; value: number; whenMissing: MissingPolicy }
-  /** True when the nutrient is (or is not) unknown. Used to build
-   *  "per 100g figure is missing, so fall back to per-serving" rules. */
-  | { kind: "missing"; field: NumericField; missing: boolean }
-  | { kind: "category"; op: "includesAny" | "excludesAll"; values: string[] };
-
-/** A rule fires when EVERY condition in `all` holds AND the `except` clause
- *  does not (an empty/absent `except` never vetoes). Rules are evaluated in
- *  ascending `priority`; the first firing rule decides the color.
- *
- *  `except` exists so the protocol's carve-outs read the way a dietitian
- *  states them -- "high fat is red, unless it is nuts" -- instead of forcing
- *  every exemption to be duplicated across near-identical rules. */
-export interface Rule {
-  id: string;
-  enabled: boolean;
-  priority: number;
+/** One row of the rules table. */
+export interface GroupRule {
   label: string;
-  scope: "food" | "beverage" | "any";
-  color: TrafficColor;
-  /** Family-facing explanation. Supports `{value}` (the measured amount of
-   *  the rule's first numeric condition) and `{limit}` (its threshold). */
-  reason: string;
-  all: Condition[];
-  except?: Condition[];
+  kind: GroupKind;
+  /** The guide's serving in household words, shown in the reasons. */
+  serv: string;
+  /** This app's gram estimate of that serving; calories are measured in it. */
+  servG: number | null;
+  /** Green up to and including this many calories. Only vegetables have one. */
+  green: number | null;
+  /** Yellow up to and including this many calories; red above it. */
+  yellow: number | null;
+  /** Red when more than this share of calories comes from sugar (cold cereal). */
+  sugarPct: number | null;
 }
 
 export interface RuleSet {
-  rules: Rule[];
-  /** color applied when no rule fires. */
-  defaultColor: TrafficColor;
-  defaultReasonFood: string;
-  defaultReasonBeverage: string;
+  /** 2 is the food-group table. Anything else is the retired rule list and is
+   *  read as the defaults. */
+  version: 2;
+  groups: Record<FoodGroup, GroupRule>;
   updatedAt?: number;
   updatedBy?: string;
 }
 
 export interface Classification {
-  color: TrafficColor;
-  /** The rule that decided the color (`null` when the default applied). */
-  decidedBy: string | null;
-  /** Human-readable explanations, decisive one first. */
+  /** `"none"` is the guide's "no color". `null` means the guide gives no
+   *  verdict here (a combination food, a group it cannot detect, or no
+   *  calorie data), so whatever the family chooses stands. */
+  color: EntryColor | null;
+  group: FoodGroup | null;
+  /** Grams of the serving the calories were measured in. */
+  servG: number | null;
+  /** Calories in that serving. */
+  kcalServ: number | null;
+  /** Human-readable explanations, the deciding one first. */
   reasons: string[];
 }
 
@@ -275,10 +256,16 @@ export interface LogEntry {
   servingLabel: string;
   source: string;
   code: string;
-  /** color the family chose. This is what counts -- always authoritative. */
-  color: TrafficColor;
-  /** color the rule engine computed at log time. */
-  autoColor: TrafficColor;
+  /** color the family chose, or "none" for a food the guide gives no color.
+   *  This is what counts -- always authoritative. */
+  color: EntryColor;
+  /** color the rule engine computed at log time. `null` when the guide gives
+   *  no verdict (a combination food, an undetected group) and the family's
+   *  choice stood unchallenged. */
+  autoColor: EntryColor | null;
+  /** The guide's food group the engine placed it in. Absent on entries logged
+   *  before groups existed. */
+  group?: FoodGroup | null;
   /** True when the family's color differed from the engine's and they
    *  confirmed their own choice anyway. */
   overridden: boolean;

@@ -49,6 +49,9 @@
   --tl-green-soft: #ecfdf5;
   --tl-yellow-soft: #fffbeb;
   --tl-red-soft: #fff1f2;
+  /* "No color" is deliberately not a hue: a neutral grey with a hollow mark. */
+  --tl-none: #64748b;
+  --tl-none-soft: #f1f5f9;
   --tl-grid: #e2e8f0;
 }
 
@@ -59,6 +62,8 @@
   --tl-green-soft: #022c22;
   --tl-yellow-soft: #2a1a05;
   --tl-red-soft: #2b0a15;
+  --tl-none: #94a3b8;
+  --tl-none-soft: #1e293b;
   --tl-grid: #1e293b;
 }
 

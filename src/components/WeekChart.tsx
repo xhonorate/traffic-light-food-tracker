@@ -32,8 +32,11 @@ export function totalsByDay(days: string[], entries: LogEntry[]): DayTotals[] {
   for (const e of entries) {
     const row = map.get(e.date);
     if (!row) continue;
-    row[e.color] += e.servings;
-    row.total += e.servings;
+    // "No color" foods (water, plain tea) add calories but no bar.
+    if (e.color !== "none") {
+      row[e.color] += e.servings;
+      row.total += e.servings;
+    }
     if (e.kcal !== null && e.kcal !== undefined)
       row.kcal = (row.kcal ?? 0) + e.kcal;
   }

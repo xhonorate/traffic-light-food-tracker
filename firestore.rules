@@ -141,8 +141,10 @@ service cloud.firestore {
         allow create: if isFamily()
           && familyId == myFamilyId()
           && request.resource.data.memberId in ['parent', 'child']
-          && request.resource.data.color in ['green', 'yellow', 'red']
-          && request.resource.data.autoColor in ['green', 'yellow', 'red']
+          // 'none' is the guide's "no color" (water, plain tea). A null
+          // autoColor means the guide gave no verdict (combination foods).
+          && request.resource.data.color in ['green', 'yellow', 'red', 'none']
+          && request.resource.data.autoColor in ['green', 'yellow', 'red', 'none', null]
           && request.resource.data.servings is number
           && request.resource.data.servings > 0
           && request.resource.data.servings <= 50

@@ -1,13 +1,13 @@
 // Checks for the daily-goal evaluation, focused on the cases where the
 // "obvious" answer is wrong. Run with `npm run test:goals`.
 import { evaluateDays, missDistance, summariseGoals } from "../src/lib/goals";
-import { resolveGoals, type LogEntry, type MemberGoals } from "../src/lib/types";
+import { resolveGoals, type EntryColor, type LogEntry, type MemberGoals } from "../src/lib/types";
 
 // Calorie band 1500-1800.
 const GOALS: MemberGoals = { dailyRed: 2, dailyGreen: 5, dailyKcal: 1650 };
 
 let id = 0;
-function entry(date: string, color: "green" | "yellow" | "red", servings: number, kcal: number | null): LogEntry {
+function entry(date: string, color: EntryColor, servings: number, kcal: number | null): LogEntry {
   return {
     id: `e${id++}`, memberId: "child", date, createdAt: Date.now(),
     name: "test", brand: "", servings,
@@ -33,6 +33,9 @@ const entries: LogEntry[] = [
   entry(DAYS[4], "yellow", 1, 1500),
   // Day 6: 1499 kcal -> calories missed for eating too little
   entry(DAYS[5], "yellow", 1, 1499),
+  // Water has no color: it adds no red or green, but its calories still count
+  entry(DAYS[0], "none", 8, 0),
+  entry(DAYS[4], "none", 1, 5),
 ];
 
 const results = evaluateDays(DAYS, entries, GOALS);
@@ -53,6 +56,8 @@ check("day4 logged flag", results[3].logged, false);
 check("day3 kcal stays null", results[2].kcal, null);
 check("day5 kcal (exact lower boundary counts as met)", results[4].met.kcal, true);
 check("day6 kcal (below the band is a miss)", results[5].met.kcal, false);
+check("no-color servings count as neither red nor green", [results[0].red, results[0].green], [2, 5]);
+check("no-color calories still count", results[4].kcal, 1505);
 
 // Calories are green or red: no amber near miss, above or below.
 check("over the band is a clear miss", missDistance(results[1], "kcal", GOALS), "far");

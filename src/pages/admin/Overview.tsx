@@ -78,7 +78,7 @@ export default function Overview() {
     const colors = { green: 0, yellow: 0, red: 0 };
     let overridden = 0;
     for (const x of e) {
-      colors[x.color] += x.servings;
+      if (x.color !== "none") colors[x.color] += x.servings;
       if (x.overridden) overridden += 1;
     }
     const totalcolor = colors.green + colors.yellow + colors.red;

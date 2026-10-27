@@ -6,6 +6,8 @@
  * tested directly against live API responses -- see scripts/usda-check.ts.
  */
 
+import { fdcCatsToTags, offCatsToTags } from "./foodTags";
+
 export interface Nutrients {
   kcal: number | null; fat: number | null; sat: number | null;
   sugars: number | null; added: number | null; protein: number | null;
@@ -15,10 +17,18 @@ export const EMPTY: Nutrients = { kcal: null, fat: null, sat: null, sugars: null
 export interface FoodFacts {
   name: string; brand: string; cats: string[]; isBeverage: boolean;
   per100: Nutrients; serv: Nutrients; servingLabel: string; source: string; code: string;
+  /** USDA's food category, read by the client's food-group detection. */
+  usdaCategory: string;
+  /** The ingredient list names an artificial sweetener (red, FRG p.2). */
+  sweetened: boolean;
+  /** Grams in the label serving, when the label states one. */
+  servQtyG: number | null;
 }
 
+/** 2047 and 2048 are the Atwater energy figures Foundation foods report in
+ *  place of 1008; the first one present wins. */
 const FDC_NUTR: Record<number, keyof Nutrients> = {
-  1008: "kcal", 1004: "fat", 1258: "sat", 1003: "protein", 1235: "added", 2000: "sugars", 1063: "sugars",
+  1008: "kcal", 2047: "kcal", 2048: "kcal", 1004: "fat", 1258: "sat", 1003: "protein", 1235: "added", 2000: "sugars", 1063: "sugars",
 };
 
 function titleCase(s: string): string {
@@ -28,46 +38,12 @@ function titleCase(s: string): string {
   return s;
 }
 
-/**
- * Map a USDA record onto Open Food Facts style category tags, so a single set
- * of rules can score foods from either source.
- */
-function fdcCatsToTags(f: Record<string, unknown>): { tags: string[]; isBeverage: boolean } {
-  const cat = String(f.foodCategory ?? "").toLowerCase();
-  const desc = String(f.description ?? "").toLowerCase();
-  const tags: string[] = [];
-  let isBeverage = false;
-
-  if (cat.includes("vegetable")) tags.push("en:vegetables");
-  if (cat.includes("fruit")) {
-    if (desc.includes("juice") || desc.includes("nectar")) {
-      tags.push("en:beverages", "en:fruit-juices"); isBeverage = true;
-    } else tags.push("en:fruits");
-    if (desc.includes("dried") || desc.includes("dehydrated")) tags.push("en:dried");
-  }
-  if (cat.includes("sweets") || desc.includes("candy") || desc.includes("candies")) {
-    tags.push("en:sugary-snacks", "en:candies");
-  }
-  if (cat.includes("snacks")) tags.push("en:salty-snacks");
-  if (cat.includes("baked products") && /cookie|cake|pastry|doughnut|donut|brownie|pie\b/.test(desc)) {
-    tags.push("en:sugary-snacks", "en:biscuits");
-  }
-  if (cat.includes("cereal")) tags.push("en:breakfast-cereals");
-  if (cat.includes("nut and seed")) tags.push("en:nuts");
-  if (cat.includes("beverages") || cat.includes("alcoholic")) { tags.push("en:beverages"); isBeverage = true; }
-  if (/\b(soda|sodas|cola|colas|soft drinks?|energy drinks?)\b/.test(desc)) {
-    tags.push("en:beverages", "en:sodas"); isBeverage = true;
-  }
-  if ((cat.includes("dairy") || cat.includes("beverages")) && desc.includes("milk") && !cat.includes("sweets")) {
-    tags.push("en:beverages", "en:milks"); isBeverage = true;
-    if (/skim|nonfat|non-fat|fat.free/.test(desc)) tags.push("en:skimmed-milks");
-    if (/chocolate|strawberry|flavou?red/.test(desc)) tags.push("en:flavoured-milks");
-  }
-  if (desc.includes("yogurt") || desc.includes("yoghurt")) { tags.push("en:yogurts"); isBeverage = false; }
-  if (desc.includes("fried") && !desc.includes("stir")) tags.push("en:fried-food");
-  if (desc.includes("water") && (cat.includes("beverages") || !cat)) { tags.push("en:waters"); isBeverage = true; }
-
-  return { tags, isBeverage };
+/** The guide makes every artificially sweetened drink red (FRG p.2). USDA
+ *  Branded records carry the ingredient list as a string, and the sweetener
+ *  is named in it. Copied from the client's prototype. */
+const SWEETENER_RE = /\b(sucralose|aspartame|acesulfame|ace-k|saccharin|stevia|steviol|rebaudioside|reb\s?a|monk\s?fruit|luo\s?han|erythritol|neotame|advantame|cyclamate|splenda)\b/i;
+export function looksArtificiallySweetened(ingredients: unknown): boolean {
+  return SWEETENER_RE.test(String(ingredients || ""));
 }
 
 /** USDA reports serving units with UNECE codes as well as plain ones. Only
@@ -206,7 +182,8 @@ export function foodFromFDC(f: Record<string, any>): FoodFacts {
 
   // Prefer the label serving on a packaged product; otherwise fall back to
   // USDA's household measures; only then to a bare 100g.
-  const portion = brandedPortion(f) ?? measuredPortion(f);
+  const label = brandedPortion(f);
+  const portion = label ?? measuredPortion(f);
 
   const serv: Nutrients = portion ? scaleTo(per100, portion.grams) : { ...EMPTY };
   const servingLabel = portion ? portion.label : (isBeverage ? "100 ml" : "100 g");
@@ -217,6 +194,11 @@ export function foodFromFDC(f: Record<string, any>): FoodFacts {
     cats: tags, isBeverage, per100, serv, servingLabel,
     source: `USDA ${f.dataType ?? "FoodData Central"}`,
     code: String(f.gtinUpc ?? ""),
+    usdaCategory: String(f.foodCategory ?? ""),
+    sweetened: looksArtificiallySweetened(f.ingredients),
+    // Only a label serving: USDA's household measures are not what the
+    // package says, and detection reads this as the package's unit.
+    servQtyG: label ? label.grams : null,
   };
 }
 
@@ -229,9 +211,11 @@ export function foodFromOFF(p: Record<string, any>): FoodFacts {
     return null;
   };
 
-  const cats = ((p.categories_tags ?? []) as string[]).map((c) => String(c).toLowerCase());
-  const isBeverage = cats.some((c) =>
+  const offCats = ((p.categories_tags ?? []) as string[]).map((c) => String(c).toLowerCase());
+  const isBeverage = offCats.some((c) =>
     ["beverages", "waters", "juices", "sodas", "milks"].some((k) => c.includes(k)));
+  const cats = offCatsToTags(offCats);
+  if (isBeverage && !cats.includes("beverages")) cats.push("beverages");
 
   const per100: Nutrients = {
     kcal: g("energy-kcal_100g"), fat: g("fat_100g"), sat: g("saturated-fat_100g"),
@@ -265,6 +249,9 @@ export function foodFromOFF(p: Record<string, any>): FoodFacts {
     cats, isBeverage, per100, serv, servingLabel,
     source: "Open Food Facts",
     code: String(p.code ?? ""),
+    usdaCategory: "",
+    sweetened: looksArtificiallySweetened(p.ingredients_text),
+    servQtyG: servQty > 0 ? servQty : null,
   };
 }
 

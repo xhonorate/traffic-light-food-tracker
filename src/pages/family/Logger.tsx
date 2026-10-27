@@ -111,7 +111,7 @@ export default function Logger() {
     for (const e of dayEntries) {
       if (e.kcal !== null && e.kcal !== undefined)
         t.kcal = (t.kcal ?? 0) + e.kcal;
-      t[e.color] += e.servings;
+      if (e.color !== "none") t[e.color] += e.servings;
     }
     return t;
   }, [dayEntries]);
@@ -145,16 +145,20 @@ export default function Logger() {
       code: p.facts.code,
       color: p.color,
       autoColor: p.autoColor,
+      group: p.group,
       overridden: p.overridden,
       reasons: p.reasons,
     });
     void bumpQuickFood(family.id, member, p.original);
 
-    // Requirement 11.2: affirm a correct guess.
+    // Requirement 11.2: affirm a correct guess. Only a guess the guide had a
+    // verdict on can be "correct".
     setToast(
-      p.overridden
-        ? { msg: "Logged with your color.", tone: "info" }
-        : { msg: "Good job — that matches our guide!", tone: "success" },
+      p.color === "none"
+        ? { msg: "Logged. No color for this one.", tone: "info" }
+        : p.overridden || p.autoColor === null
+          ? { msg: "Logged with your color.", tone: "info" }
+          : { msg: "Good job — that matches our guide!", tone: "success" },
     );
   };
 

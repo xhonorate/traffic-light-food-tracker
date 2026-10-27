@@ -9,7 +9,7 @@ import type {
   RuleSet, UserDoc,
 } from "./types";
 import { DEFAULT_APP_CONFIG } from "./types";
-import { DEFAULT_RULE_SET } from "./defaultRules";
+import { DEFAULT_RULE_SET, normaliseRuleSet } from "./defaultRules";
 
 // ---------------------------------------------------------------------------
 // Rules
@@ -18,17 +18,21 @@ import { DEFAULT_RULE_SET } from "./defaultRules";
 const RULES_DOC = doc(db, "config", "rules");
 
 /** Live-subscribe to the rule set. Falls back to the built-in defaults until
- *  an admin has saved anything, so the app classifies correctly from day one. */
+ *  an admin has saved anything, so the app classifies correctly from day one.
+ *  A document still holding the retired rule list reads as the defaults too,
+ *  until an admin saves or resets. */
 export function subscribeRules(cb: (rules: RuleSet) => void, onError?: (e: Error) => void) {
   return onSnapshot(
     RULES_DOC,
-    (snap) => cb(snap.exists() ? (snap.data() as RuleSet) : DEFAULT_RULE_SET),
+    (snap) => cb(snap.exists() ? normaliseRuleSet(snap.data()) : DEFAULT_RULE_SET),
     (e) => { onError?.(e); cb(DEFAULT_RULE_SET); },
   );
 }
 
+/** Replaces the whole document, so a retired rule list is never merged into
+ *  the table. */
 export async function saveRules(rules: RuleSet, uid: string): Promise<void> {
-  await setDoc(RULES_DOC, { ...rules, updatedAt: Date.now(), updatedBy: uid });
+  await setDoc(RULES_DOC, { version: 2, groups: rules.groups, updatedAt: Date.now(), updatedBy: uid });
 }
 
 export async function resetRules(uid: string): Promise<void> {

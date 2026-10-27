@@ -111,7 +111,7 @@ export default function FamilyDetail() {
     for (const e of memberEntries) {
       if (e.kcal) s.kcal += e.kcal;
       s.days.add(e.date);
-      s[e.color] += e.servings;
+      if (e.color !== "none") s[e.color] += e.servings;
       if (e.overridden) s.overridden += 1;
     }
     return s;

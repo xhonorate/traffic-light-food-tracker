@@ -1,148 +1,98 @@
-import type {
-  Classification, Condition, FoodFacts, NumericField, Rule, RuleSet, TrafficColor,
-} from "./types";
-
-/** Pull a numeric field off a food, returning `null` for unknown. */
-export function readField(food: FoodFacts, field: NumericField): number | null {
-  const [key, basis] = field.split("_") as ["kcal" | "fat" | "sat" | "sugars" | "added" | "protein", "100" | "serv"];
-  const block = basis === "100" ? food.per100 : food.serv;
-  const v = block?.[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
-function compare(a: number, op: string, b: number): boolean {
-  switch (op) {
-    case ">=": return a >= b;
-    case ">": return a > b;
-    case "<=": return a <= b;
-    case "<": return a < b;
-    case "==": return a === b;
-    default: return false;
-  }
-}
-
-/** Category tags are matched as substrings, mirroring Open Food Facts style
- *  tags ("en:sugary-snacks" matches the needle "sugary-snacks"). */
-function catMatches(cats: string[], needles: string[]): boolean {
-  return cats.some((c) => needles.some((n) => n && c.toLowerCase().includes(n.toLowerCase())));
-}
-
-function evalCondition(cond: Condition, food: FoodFacts): boolean {
-  switch (cond.kind) {
-    case "numeric": {
-      const raw = readField(food, cond.field);
-      if (raw === null) {
-        if (cond.whenMissing === "pass") return true;
-        if (cond.whenMissing === "skip") return false;
-        return compare(0, cond.op, cond.value); // treatAsZero
-      }
-      return compare(raw, cond.op, cond.value);
-    }
-    case "missing":
-      return (readField(food, cond.field) === null) === cond.missing;
-    case "category": {
-      const hit = catMatches(food.cats ?? [], cond.values);
-      return cond.op === "includesAny" ? hit : !hit;
-    }
-    default:
-      return false;
-  }
-}
-
-function fires(rule: Rule, food: FoodFacts): boolean {
-  if (!rule.enabled) return false;
-  if (rule.scope === "food" && food.isBeverage) return false;
-  if (rule.scope === "beverage" && !food.isBeverage) return false;
-  if (!rule.all.every((c) => evalCondition(c, food))) return false;
-  // An empty `except` must never veto.
-  if (rule.except?.length && rule.except.every((c) => evalCondition(c, food))) return false;
-  return true;
-}
-
-const fmt1 = (v: number) => (Math.round(v * 10) / 10).toString();
-
-/** Fill `{value}` / `{limit}` from the rule's first numeric condition. */
-function renderReason(rule: Rule, food: FoodFacts): string {
-  const numeric = rule.all.find((c) => c.kind === "numeric");
-  if (!numeric || numeric.kind !== "numeric") return rule.reason;
-  const raw = readField(food, numeric.field);
-  return rule.reason
-    .replace(/\{value\}/g, raw === null ? "\u2013" : fmt1(raw))
-    .replace(/\{limit\}/g, fmt1(numeric.value));
-}
-
-export function sortRules(rules: Rule[]): Rule[] {
-  return [...rules].sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
-}
+import { detectGroup, type FoodGroup } from "./foodGroups";
+import type { Classification, EntryColor, FoodFacts, RuleSet } from "./types";
 
 /**
- * Run a food through the rule set.
+ * The traffic-light engine: Epstein, The Food & Activity Reference Guide
+ * (2012), as the client's prototype implements it. Three questions:
  *
- * The first firing rule (lowest priority number) decides the color. Any
- * later rules that fire with that same color are kept as supporting
- * reasons, so a food that is red for three separate reasons says so --
- * matching how the original prototype accumulated its explanations.
+ *  1. Which food group? (detectGroup, from the name, USDA category and tags)
+ *  2. How many calories in the guide's serving for that group? Often not the
+ *     package's serving: cheese is judged at 1 oz whatever the label says.
+ *  3. Which side of the group's line? Only vegetables have a green line.
+ *
+ * Juice, dried fruit and the fats/oils/sweets group are red whatever the
+ * calories; water, plain tea/coffee and seasonings have no color; cold cereal
+ * is also red above 25% of calories from sugar. Combination foods get no
+ * verdict: the guide gives them no calorie range, so the family's own choice
+ * stands. This mirrors classify() in the prototype, except that it abstains
+ * (color `null`) where the prototype asks the clinician to decide or falls
+ * back to yellow: an undetected group, a combination food, or no calories.
+ * The app's verdict only ever questions the family's choice, and a guess is
+ * no grounds to question it.
  */
-export function classify(food: FoodFacts, ruleSet: RuleSet): Classification {
-  const matches = sortRules(ruleSet.rules).filter((r) => fires(r, food));
 
-  if (matches.length === 0) {
-    return {
-      color: ruleSet.defaultColor,
-      decidedBy: null,
-      reasons: [food.isBeverage ? ruleSet.defaultReasonBeverage : ruleSet.defaultReasonFood],
-    };
+const fmt0 = (v: number) => String(Math.round(v));
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+export function classify(food: FoodFacts, ruleSet: RuleSet, groupOverride?: FoodGroup | null): Classification {
+  const det = detectGroup(food);
+  const group = groupOverride || det.group;
+  const g = group ? ruleSet.groups[group] : null;
+  const reasons: string[] = [];
+  const p = food.per100, s = food.serv;
+  const kcal100 = num(p.kcal), sug100 = num(p.sugars);
+  let servG: number | null = null, kcalServ: number | null = null;
+  const done = (color: EntryColor | null): Classification => ({ color, group: group ?? null, servG, kcalServ, reasons });
+  // The detected reason and serving apply only to the detected group.
+  const own = det.group === group;
+
+  if (!group || !g) {
+    reasons.push("Food group not detected, so the guide gives no color for it here");
+    return done(null);
+  }
+  if (g.kind === "free") {
+    reasons.push(own ? det.why : `${g.label}: no Traffic Light color`);
+    return done("none");
+  }
+  if (g.kind === "combo") {
+    reasons.push(own ? det.why : g.label);
+    reasons.push("The guide gives combination foods no calorie range (p.8): it is red if it holds a full serving of any red food");
+    return done(null);
+  }
+  if (g.kind === "alwaysRed") {
+    reasons.push(own ? det.why : `${g.label}: always red in the guide`);
+    // The color never depends on the calories here, but they are still shown.
+    servG = (own && det.servG) || g.servG || null;
+    if (kcal100 != null && servG) kcalServ = kcal100 * servG / 100;
+    else if (num(s.kcal) != null) kcalServ = num(s.kcal);
+    if (kcalServ != null) reasons.push(`${fmt0(kcalServ)} cal per serving (about ${servG} g, ${g.serv})`);
+    return done("red");
   }
 
-  const decisive = matches[0];
-  const supporting = matches.slice(1).filter((r) => r.color === decisive.color);
-  return {
-    color: decisive.color,
-    decidedBy: decisive.id,
-    reasons: [decisive, ...supporting].map((r) => renderReason(r, food)),
-  };
-}
-
-export const COLOR_LABEL: Record<TrafficColor, string> = {
-  green: "Green", yellow: "Yellow", red: "Red",
-};
-
-/** Tailwind class bundles, kept in one place so color usage stays consistent. */
-export const COLOR_STYLES: Record<TrafficColor, { dot: string; chip: string; ring: string; bar: string }> = {
-  green: {
-    dot: "bg-emerald-500",
-    chip: "bg-emerald-50 text-emerald-800 border-emerald-300 dark:bg-emerald-950 dark:text-emerald-200 dark:border-emerald-800",
-    ring: "ring-emerald-500",
-    bar: "bg-emerald-500",
-  },
-  yellow: {
-    dot: "bg-amber-400",
-    chip: "bg-amber-50 text-amber-900 border-amber-300 dark:bg-amber-950 dark:text-amber-100 dark:border-amber-800",
-    ring: "ring-amber-400",
-    bar: "bg-amber-400",
-  },
-  red: {
-    dot: "bg-rose-500",
-    chip: "bg-rose-50 text-rose-800 border-rose-300 dark:bg-rose-950 dark:text-rose-200 dark:border-rose-800",
-    ring: "ring-rose-500",
-    bar: "bg-rose-500",
-  },
-};
-
-/** Plain-English rendering of a condition, for the admin rule editor. */
-export function describeCondition(cond: Condition): string {
-  switch (cond.kind) {
-    case "numeric": {
-      const opWord = { ">=": "\u2265", ">": ">", "<=": "\u2264", "<": "<", "==": "=" }[cond.op];
-      const missing = cond.whenMissing === "treatAsZero" ? " (unknown counts as 0)"
-        : cond.whenMissing === "pass" ? " (or unknown)" : "";
-      return `${cond.field} ${opWord} ${cond.value}${missing}`;
-    }
-    case "missing":
-      return `${cond.field} is ${cond.missing ? "unknown" : "known"}`;
-    case "category":
-      return cond.op === "includesAny"
-        ? `category is one of: ${cond.values.join(", ")}`
-        : `category is none of: ${cond.values.join(", ")}`;
+  reasons.push(own && det.why ? det.why : g.label);
+  servG = (own && det.servG) || g.servG;
+  let basis = "";
+  if (kcal100 != null && servG) {
+    kcalServ = kcal100 * servG / 100;
+    basis = `${fmt0(kcalServ)} cal per guide serving (about ${servG} g${servG === g.servG ? `, ${g.serv}` : ""})`;
+  } else if (num(s.kcal) != null) {
+    kcalServ = num(s.kcal);
+    basis = `${fmt0(kcalServ!)} cal per serving as entered (the guide's serving is ${g.serv})`;
   }
+  if (kcalServ == null || g.yellow == null) {
+    reasons.push(`No calorie data, so it cannot be placed in the ${g.label.toLowerCase()} range`);
+    return done(null);
+  }
+
+  // The guide's lines are whole calories, and labels round to whole
+  // calories, so 120.4 is 120 and yellow.
+  const kc = Math.round(kcalServ);
+  let color: EntryColor;
+  if (g.green != null && kc <= g.green) color = "green";
+  else if (kc <= g.yellow) color = "yellow";
+  else color = "red";
+  reasons.push(`${basis} → ${g.green != null ? `green ≤ ${g.green}, ` : ""}yellow ≤ ${g.yellow}, red > ${g.yellow}`);
+
+  if (g.sugarPct != null) {
+    const kB = kcal100 != null ? kcal100 : num(s.kcal);
+    const sB = kcal100 != null ? sug100 : num(s.sugars);
+    if (kB != null && sB != null && kB > 0) {
+      const pct = sB * 4 / kB * 100;
+      if (pct > g.sugarPct) {
+        color = "red";
+        reasons.push(`${fmt0(pct)}% of calories from sugar: red above ${g.sugarPct}% (the guide's cereal rule)`);
+      } else reasons.push(`${fmt0(pct)}% of calories from sugar (${g.sugarPct}% allowed)`);
+    } else reasons.push("Sugar rule not checked: sugars unknown");
+  }
+  return done(color);
 }

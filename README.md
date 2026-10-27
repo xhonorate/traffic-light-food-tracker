@@ -49,101 +49,112 @@ amber banner makes the borrowed session obvious and offers one-click return.
    - **Agreement** → _"Good job — that matches our guide!"_
    - **Disagreement** → _"Are you sure?"_, with the specific reasons and a link
      to the program's food guide. They may keep their answer or change it.
+   - **No verdict** (a combination food such as pizza, a food whose group
+     cannot be worked out, or one with no calorie data) → their choice is
+     logged unchallenged. For a combination food the picker shows the guide's
+     rule as a hint: red if it holds a full serving of a red food.
 4. Whatever they chose is what gets logged. A disagreement they stood by is
    flagged `overridden`, so coaches can see where a family's intuition and the
    protocol diverge — which is teaching signal, not an error.
 
+**No color.** Water, plain tea and coffee, and seasonings have no color in the
+guide. The family is not asked; the entry is logged as `none`, its calories
+count, and it counts toward no red, yellow or green total and no goal.
+
 Both the color the family chose and the color the engine computed are stored
-on every entry, along with the nutrition at the moment it was logged.
+on every entry (`autoColor` is `null` where the guide gave no verdict), along
+with the food group and the nutrition at the moment it was logged.
 **Changing the rules never re-scores history.**
 
 ---
 
 ## The rule engine
 
-The prototype's classifier was hardcoded JavaScript. Here the same logic is
-**data** — an ordered list of rules in Firestore that an admin edits in the app,
-no redeploy involved.
+The rules are Epstein's _Food & Activity Reference Guide_ (2012), as the
+client's traffic-light-food-logger prototype implements it and their "Traffic
+light logic" slides set out. Every food goes through three questions:
 
-A rule fires when every condition in `all` holds and its `except` clause does
-not. Rules are evaluated in priority order; **the first match decides the
-color**, and later matches of that same color are kept as supporting reasons.
+1. **Which food group?** One of 17, worked out from the name, USDA's category
+   and the food's [categories](#food-categories).
+2. **How many calories in the guide's serving for that group?** Often not the
+   package's: cheese is judged at 1 oz (28 g) whatever the label says.
+3. **Which side of the group's line?** Only vegetables have a green line.
 
-```jsonc
-{
-  "id": "red-high-fat-100",
-  "priority": 140,
-  "scope": "food",
-  "color": "red",
-  "label": "High total fat (per 100g)",
-  "reason": "High fat: {value}g per 100g (≥ {limit})",
-  "all": [
-    {
-      "kind": "numeric",
-      "field": "fat_100",
-      "op": ">=",
-      "value": 17,
-      "whenMissing": "skip",
-    },
-  ],
-  // ...unless it is unsweetened nuts, which the protocol spares
-  "except": [
-    {
-      "kind": "category",
-      "op": "includesAny",
-      "values": ["nuts", "nut-butters", "peanut-butter", "seeds"],
-    },
-    {
-      "kind": "numeric",
-      "field": "added_100",
-      "op": "<",
-      "value": 5,
-      "whenMissing": "pass",
-    },
-  ],
-}
-```
+| Group                            | Serving used | Green  | Yellow | Red                         |
+| -------------------------------- | ------------ | ------ | ------ | --------------------------- |
+| Vegetables                       | 65 g         | ≤ 30   | ≤ 45   | above 45                    |
+| Starchy vegetables               | 80 g         |        | ≤ 120  | above 120                   |
+| Fruit                            | 90 g         |        | ≤ 90   | above 90                    |
+| Fruit juice & dried fruit        | 240 g        |        |        | always                      |
+| Grains                           | 28 g         |        | ≤ 120  | above 120                   |
+| Cold cereal                      | 30 g         |        | ≤ 120  | above 120, or > 25% sugar   |
+| Cheese                           | 28 g         |        | ≤ 83   | above 83                    |
+| Milk, yogurt & other dairy       | 245 g        |        | ≤ 135  | above 135                   |
+| Meat & seafood                   | 85 g         |        | ≤ 158  | above 158                   |
+| Eggs, beans & meat substitutes   | 90 g         |        | ≤ 120  | above 120                   |
+| Nuts & seeds                     | 28 g         |        | ≤ 68   | above 68                    |
+| Fats, oils, sweets & others      | 15 g         |        |        | always                      |
+| Soup: broth-based & chowder      | 245 g        |        | ≤ 186  | above 186                   |
+| Soup: chili, bean/lentil & gumbo | 245 g        |        | ≤ 224  | above 224                   |
+| Condiments, dressings & ingredients | 15 g      |        | ≤ 23   | above 23                    |
+| Combination food                 | —            | no verdict: the family decides |  |                    |
+| Water, plain tea/coffee, seasonings | —         | no color |      |                             |
 
-Three condition kinds cover everything the protocol needed:
+The table is **data** in Firestore (`config/rules`), and every serving size and
+line is editable in the app. Some foods get the guide's own serving instead of
+the group's: a yogurt cup, a patty, a packet of instant
+oatmeal. Diet soda and anything whose ingredients name an artificial sweetener
+are in the always-red group (FRG p.2). Calories are rounded to whole numbers
+before they are compared, as labels are.
 
-- **numeric** — compare a nutrient, per 100g/ml or per serving. `whenMissing`
-  decides what an _unknown_ value means: skip the rule, count it as zero, or
-  pass anyway. This distinction matters: unknown added sugar is not zero
-  added sugar.
-- **category** — match Open Food Facts style tags as substrings, so `fruits`
-  matches `en:fruits`. The editor suggests only the 18 tags USDA name-search
-  results are mapped to (kept in step with the server by
-  `npm run test:categories`). Any other tag can still be typed, but only
-  matches barcode scans, which carry Open Food Facts' ~9,000 categories. That
-  list is kept in `src/lib/offCategories.ts` so the check can flag rule tags
-  nothing would match; refresh it with `npm run categories:build`.
-- **missing** — "the per-100g figure is unknown", which is how the per-serving
-  fallback rules are expressed.
+Group detection ([src/lib/foodGroups.ts](src/lib/foodGroups.ts)) is the
+prototype's `detectGroup()`, ported line for line with only type annotations
+added; change it only alongside theirs. The engine itself
+([src/lib/rules.ts](src/lib/rules.ts)) follows the prototype's `classify()`,
+except that where the prototype asks the clinician to decide or falls back to
+yellow, the app gives no verdict. The verdict is only ever used to question
+the family's choice, and a guess is no grounds to question it.
 
-The `except` clause exists so carve-outs read the way a dietitian says them —
-_"high fat is red, unless it's nuts"_ — instead of forcing every exemption to be
-duplicated across near-identical rules.
+Combination foods are not taken apart. The prototype estimates each
+ingredient's share from the order of the label's ingredient list and adds up
+the red servings; that is left out for now, so the family decides.
 
-### Parity with the prototype
+`npm run test:rules` runs real-shaped USDA, Open Food Facts and hand-entered
+records through the server's mapping and the engine, and pins the results the
+slides give (cheddar 113 cal red, carrots 27 cal green) plus a food for every
+row of the table.
 
-The 22 seeded rules reproduce the original `classify()` exactly. This was
-verified against the prototype's own function across 31 foods, including every
-awkward path: sweetened vs unsweetened nut butter, dried vs fresh fruit, yogurt
-filed under "desserts", protein-spared calorie density, diet soda, and foods
-with no per-100g data at all. **31/31 agree.**
+A rule set saved before the table existed (the old list of nutrient rules)
+reads as the defaults until an admin saves or resets.
 
-That check is kept as a regression test — run `npm run test:rules` after any
-change to `defaultRules.ts` or the engine. It compares against a verbatim copy
-of the prototype's original function in
-[scripts/rule-parity.ts](scripts/rule-parity.ts).
+### Food categories
+
+The tags, and the mapping that assigns them, are the client's
+`fdcCatsToTags()` from their traffic-light-food-logger prototype, ported line
+for line into [src/lib/foodTags.ts](src/lib/foodTags.ts). They are one of the
+inputs to group detection. A food can carry several (skim milk is
+`beverages`, `milks` and `skimmed-milks`) or none (chicken breast).
+
+| Food added by            | How it gets its tags                                                                   |
+| ------------------------ | -------------------------------------------------------------------------------------- |
+| Name search (USDA)       | `fdcCatsToTags`, from USDA's food category and the description                         |
+| Barcode, USDA match      | the same                                                                               |
+| Barcode, Open Food Facts | `offCatsToTags`: each OFF category gets what the matching USDA category would get, so chocolate gets what USDA's "Sweets" gets |
+| Typed in by hand         | `fdcCatsToTags` on the name, with the family's food/drink choice standing in for the category |
+
+Cloud Functions are a separate package, so `functions/src/foodTags.ts` is a
+verbatim copy; `npm run test:categories` fails if the two differ, or if any
+pinned USDA or Open Food Facts example is sorted differently.
 
 ### Editing rules safely
 
-**Admin → Rules** gives you add, delete, reorder, enable/disable, and full
-condition editing, plus a **Test a food** panel that runs your _unsaved_ draft
-against a food and shows which rules fire, which one decides, and exactly what
-values the engine is reading. Tuning thresholds blind is how a protocol quietly
-breaks; the tester is the safety net.
+**Admin → Rules** shows one row per food group: the guide's serving in words,
+the grams used, and the green and yellow lines (and cold cereal's sugar
+share). A row with a missing line cannot be saved. **Test a food** runs your
+_unsaved_ draft against a food and shows each step — group, serving, calories,
+line, verdict — and lets you force a group to see how it would score there.
+Tuning figures blind is how a protocol quietly breaks; the tester is the
+safety net.
 
 ---
 
@@ -293,6 +304,9 @@ Two notes on that shape, both consequences of matching the original format:
   the app does store. Use the summary export, or widen `ENTRY_HEADERS` in
   [src/lib/csv.ts](src/lib/csv.ts), if you need them.
 
+`color` can be `none` (water, plain tea). `auto_color` is blank where the guide
+gave no verdict (combination foods). The summary's counts leave `none` out.
+
 Unknown nutrients are written as empty cells rather than `0`, so "not measured"
 never reads as "measured zero".
 
@@ -440,9 +454,11 @@ curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 ```
 src/
   lib/
-    types.ts          domain types, including the rule schema
+    types.ts          domain types, including the rules table
+    foodTags.ts       food categories (the client's fdcCatsToTags)
+    foodGroups.ts     the guide's 17 food groups (the client's detectGroup)
     rules.ts          the rule engine
-    defaultRules.ts   22 rules ported from the prototype
+    defaultRules.ts   the guide's rules table
     data.ts           all Firestore access
     auth.tsx          auth, roles, and "open as"
     csv.ts            export
@@ -462,13 +478,12 @@ firestore.rules       access control
 npm run dev              # dev server
 npm run build            # typecheck + production build
 npm run typecheck        # types only
-npm test                 # the five suites below
-npm run test:rules       # rule-engine parity against the prototype
+npm test                 # the suites below
+npm run test:rules       # the engine against the client's worked examples
 npm run test:goals       # daily-goal evaluation semantics
 npm run test:rank        # USDA search-result ranking
-npm run test:categories  # rule-editor category suggestions
+npm run test:categories  # food categories and the rule editor's list
 npm run test:barcode     # barcode decoding from camera-like frames
-npm run categories:build # refresh the Open Food Facts category list
 npm run deploy           # build and deploy everything
 npm run deploy:hosting   # site only
 npm run deploy:rules     # Firestore rules and indexes only

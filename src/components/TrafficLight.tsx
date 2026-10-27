@@ -1,4 +1,4 @@
-import type { TrafficColor } from "../lib/types";
+import type { EntryColor, TrafficColor } from "../lib/types";
 import { cx } from "./ui";
 
 /**
@@ -8,27 +8,31 @@ import { cx } from "./ui";
  * distinct shape (circle / triangle / hexagon) and, wherever there is room,
  * the written word. That is what makes the palette safe for red-green color
  * blindness -- roughly 1 in 12 men -- in an app whose entire vocabulary is
- * red versus green.
+ * red versus green. The guide's "no color" (water, plain tea) is a hollow grey
+ * ring: not one of the three, and never counted with them.
  */
 
 export const COLOR_ORDER: TrafficColor[] = ["green", "yellow", "red"];
 
-export const COLOR_WORD: Record<TrafficColor, string> = {
+export const COLOR_WORD: Record<EntryColor, string> = {
   green: "Green",
   yellow: "Yellow",
   red: "Red",
+  none: "No color",
 };
 
-export const COLOR_VAR: Record<TrafficColor, string> = {
+export const COLOR_VAR: Record<EntryColor, string> = {
   green: "var(--tl-green)",
   yellow: "var(--tl-yellow)",
   red: "var(--tl-red)",
+  none: "var(--tl-none)",
 };
 
-export const COLOR_SOFT_VAR: Record<TrafficColor, string> = {
+export const COLOR_SOFT_VAR: Record<EntryColor, string> = {
   green: "var(--tl-green-soft)",
   yellow: "var(--tl-yellow-soft)",
   red: "var(--tl-red-soft)",
+  none: "var(--tl-none-soft)",
 };
 
 /** Plain-language guidance shown next to each choice. */
@@ -48,7 +52,7 @@ export function ColorMark({
   className,
   withRing,
 }: {
-  color: TrafficColor;
+  color: EntryColor;
   size?: number;
   className?: string;
   withRing?: boolean;
@@ -80,6 +84,9 @@ export function ColorMark({
       {color === "red" && (
         <path d="M12 2.6 20.1 7.3v9.4L12 21.4 3.9 16.7V7.3z" fill={fill} />
       )}
+      {color === "none" && (
+        <circle cx="12" cy="12" r="7" fill="none" stroke={fill} strokeWidth="2.5" />
+      )}
     </svg>
   );
 }
@@ -90,7 +97,7 @@ export function ColorChip({
   size = "md",
   className,
 }: {
-  color: TrafficColor;
+  color: EntryColor;
   size?: "sm" | "md";
   className?: string;
 }) {

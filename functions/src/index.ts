@@ -941,7 +941,7 @@ async function usdaSearch(
 const FOOD_RESULT_LIMIT = 12;
 
 const OFF_FIELDS =
-  "code,product_name,brands,serving_size,serving_quantity,nutriments,categories_tags,nutrition_data_per";
+  "code,product_name,brands,serving_size,serving_quantity,nutriments,categories_tags,nutrition_data_per,ingredients_text";
 
 export const searchFoods = onCall({ secrets: [USDA_API_KEY] }, async (req) => {
   requireAuth(req);

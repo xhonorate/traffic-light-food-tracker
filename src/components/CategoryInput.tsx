@@ -7,16 +7,17 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
-import { normaliseCategory, suggestCategories } from "../lib/categories";
+import { isFoodTag, normaliseCategory, suggestCategories } from "../lib/categories";
 import { cx } from "./ui";
 
 /**
  * A list of category tags, edited as chips with autocomplete.
  *
- * Only the 18 USDA tags are suggested. Suggestions are a convenience, not a
- * constraint: rules match tags as partial
- * text, so anything typed is accepted. Enter, comma or leaving the box adds
- * what has been typed; pasting a comma-separated list adds each item.
+ * Only the program's food categories (FOOD_TAGS) can be added: no food
+ * carries any other tag, so anything else could never match. Enter adds the
+ * highlighted suggestion; comma or leaving the box adds what has been typed
+ * if it names a category; pasting a comma-separated list adds each one that
+ * does. A value saved before the list was fixed is kept, but flagged.
  */
 export default function CategoryInput({
   values,
@@ -31,8 +32,8 @@ export default function CategoryInput({
   const inputRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState("");
   const [open, setOpen] = useState(false);
-  // Highlighted suggestion; -1 until the arrow keys are used, so Enter adds
-  // exactly what was typed. Partial tags like "fruit" are deliberate.
+  // Highlighted suggestion. The first one is highlighted as soon as anything
+  // is typed, so Enter completes a partial name.
   const [active, setActive] = useState(-1);
 
   const suggestions = useMemo(
@@ -40,13 +41,13 @@ export default function CategoryInput({
     [text, values],
   );
 
-  useEffect(() => setActive(-1), [text]);
+  useEffect(() => setActive(text.trim() ? 0 : -1), [text]);
 
   const add = (raw: string[]) => {
     const next = [...values];
     for (const r of raw) {
       const v = normaliseCategory(r);
-      if (v && !next.includes(v)) next.push(v);
+      if (isFoodTag(v) && !next.includes(v)) next.push(v);
     }
     if (next.length !== values.length) onChange(next);
     setText("");
@@ -101,7 +102,13 @@ export default function CategoryInput({
         {values.map((v) => (
           <span
             key={v}
-            className="inline-flex max-w-full items-center gap-0.5 rounded-lg bg-slate-100 py-0.5 pr-0.5 pl-2 text-sm text-slate-800 dark:bg-slate-800 dark:text-slate-100"
+            title={isFoodTag(v) ? undefined : "Not a food category: no food carries this tag, so it never matches"}
+            className={cx(
+              "inline-flex max-w-full items-center gap-0.5 rounded-lg py-0.5 pr-0.5 pl-2 text-sm",
+              isFoodTag(v)
+                ? "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-100"
+                : "bg-amber-100 text-amber-900 line-through dark:bg-amber-950 dark:text-amber-200",
+            )}
           >
             <span className="truncate">{v}</span>
             <button
@@ -156,7 +163,7 @@ export default function CategoryInput({
         >
           {!text.trim() && (
             <li className="px-3 pt-1 pb-1.5 text-xs text-slate-500 dark:text-slate-400" role="presentation">
-              Tags foods from name search can carry
+              Food categories
             </li>
           )}
           {suggestions.map((tag, i) => (
@@ -178,6 +185,11 @@ export default function CategoryInput({
             </li>
           ))}
         </ul>
+      )}
+      {open && text.trim() && suggestions.length === 0 && (
+        <p className="absolute inset-x-0 top-full z-30 mt-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500 shadow-lg dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+          No food category matches “{text.trim()}”.
+        </p>
       )}
     </div>
   );
