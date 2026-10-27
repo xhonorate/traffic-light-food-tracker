@@ -87,10 +87,7 @@ export default function AddFoodSheet({
   const [facts, setFacts] = useState<FoodFacts | null>(null);
   const [servings, setServings] = useState(1);
   const [guess, setGuess] = useState<TrafficColor | null>(null);
-  const [challenge, setChallenge] = useState<{
-    auto: TrafficColor;
-    reasons: string[];
-  } | null>(null);
+  const [challenge, setChallenge] = useState<Challenge | null>(null);
   const [saving, setSaving] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [lookingUp, setLookingUp] = useState<string | null>(null);
@@ -146,9 +143,10 @@ export default function AddFoodSheet({
   /**
    * Requirement 11 option 2. The family commits to a color, then the engine
    * responds: agreement is affirmed, disagreement is questioned but never
-   * enforced. Their answer is always what gets logged. Where the guide has no
-   * verdict (a combination food, a group it cannot tell) there is nothing to
-   * question, and a "no color" food is logged without asking at all.
+   * enforced. Their answer is always what gets logged. A combination food has
+   * no verdict, but a green or yellow guess is still questioned once with the
+   * guide's rule for mixed dishes. Where the group cannot be told there is
+   * nothing to question, and a "no color" food is logged without asking.
    */
   const submit = async (finalColor: EntryColor, forced = false) => {
     if (!facts || !verdict) return;
@@ -157,6 +155,10 @@ export default function AddFoodSheet({
 
     if (!forced && disagrees && verdict.color !== "none" && finalColor !== "none") {
       setChallenge({ auto: verdict.color as TrafficColor, reasons: verdict.reasons });
+      return;
+    }
+    if (!forced && verdict.group === "combo" && verdict.color === null && finalColor !== "red") {
+      setChallenge({ auto: "red", reasons: [], combo: true });
       return;
     }
 
@@ -584,6 +586,15 @@ function CustomStep({
 // Step 2: portion + color guess
 // ---------------------------------------------------------------------------
 
+/** The "Are you sure?" prompt. `combo` is the mixed-dish prompt: the guide has
+ *  no verdict on the dish, only the rule that one serving of a red food in it
+ *  makes the whole dish red (FRG p.8). */
+interface Challenge {
+  auto: TrafficColor;
+  reasons: string[];
+  combo?: boolean;
+}
+
 function DetailStep({
   resolving,
   facts,
@@ -609,7 +620,7 @@ function DetailStep({
   setMeal: (m: Meal) => void;
   guess: TrafficColor | null;
   setGuess: (c: TrafficColor) => void;
-  challenge: { auto: TrafficColor; reasons: string[] } | null;
+  challenge: Challenge | null;
   saving: boolean;
   foodGuideUrl: string;
   onBack: () => void;
@@ -730,13 +741,6 @@ function DetailStep({
             </span>
             <ColorWordHelp foodGuideUrl={foodGuideUrl} />
           </div>
-          {verdict.group === "combo" && verdict.color === null && (
-            <p className="mb-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
-              A mixed dish is red if it has a full serving of a red food in it,
-              like cheese, pepperoni or anything fried. Otherwise it is yellow.
-              You decide.
-            </p>
-          )}
           <ColorPicker value={guess} onChange={setGuess} disabled={saving} />
         </div>
       )}
@@ -755,19 +759,34 @@ function DetailStep({
             </svg>
             Are you sure?
           </p>
-          <p className="mt-1.5 text-sm text-amber-900/90 dark:text-amber-100/90">
-            Our guide would call this one{" "}
-            <span className="inline-flex items-center gap-1 font-semibold">
-              <ColorMark color={challenge.auto} size={13} />
-              {challenge.auto}
-            </span>
-            :
-          </p>
-          <ul className="mt-1.5 space-y-0.5 text-sm text-amber-900/80 dark:text-amber-100/80">
-            {challenge.reasons.map((r, i) => (
-              <li key={i}>• {r}</li>
-            ))}
-          </ul>
+          {challenge.combo ? (
+            <p className="mt-1.5 text-sm text-amber-900/90 dark:text-amber-100/90">
+              This is a mixed dish. If any part of it is a full serving of a red
+              food, like cheese, pepperoni, bacon or anything fried, the whole
+              dish counts as{" "}
+              <span className="inline-flex items-center gap-1 font-semibold">
+                <ColorMark color="red" size={13} />
+                red
+              </span>
+              .
+            </p>
+          ) : (
+            <>
+              <p className="mt-1.5 text-sm text-amber-900/90 dark:text-amber-100/90">
+                Our guide would call this one{" "}
+                <span className="inline-flex items-center gap-1 font-semibold">
+                  <ColorMark color={challenge.auto} size={13} />
+                  {challenge.auto}
+                </span>
+                :
+              </p>
+              <ul className="mt-1.5 space-y-0.5 text-sm text-amber-900/80 dark:text-amber-100/80">
+                {challenge.reasons.map((r, i) => (
+                  <li key={i}>• {r}</li>
+                ))}
+              </ul>
+            </>
+          )}
           <p className="mt-2.5 text-sm font-medium text-amber-900 dark:text-amber-100">
             It is your call — what would you like to do?
           </p>

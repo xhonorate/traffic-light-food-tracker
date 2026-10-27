@@ -279,7 +279,7 @@ function NumberField({
 const OUTCOME: Record<Exclude<GroupRule["kind"], "graded">, { mark: "red" | "none"; text: string }> = {
   alwaysRed: { mark: "red", text: "Always red" },
   free: { mark: "none", text: "No color" },
-  combo: { mark: "none", text: "No range: the family decides" },
+  combo: { mark: "none", text: "No range: family decides, asked if not red" },
 };
 
 function GroupRow({

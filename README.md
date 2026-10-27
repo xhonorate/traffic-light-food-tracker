@@ -49,10 +49,13 @@ amber banner makes the borrowed session obvious and offers one-click return.
    - **Agreement** → _"Good job — that matches our guide!"_
    - **Disagreement** → _"Are you sure?"_, with the specific reasons and a link
      to the program's food guide. They may keep their answer or change it.
-   - **No verdict** (a combination food such as pizza, a food whose group
-     cannot be worked out, or one with no calorie data) → their choice is
-     logged unchallenged. For a combination food the picker shows the guide's
-     rule as a hint: red if it holds a full serving of a red food.
+   - **Combination food** (pizza, sandwiches, casseroles) → the guide gives
+     no calorie range, only a rule: if any part of the dish is a full serving
+     of a red food, the whole dish is red. Red is accepted as it is; green or
+     yellow gets _"Are you sure?"_ with that rule, and they may keep their
+     answer or change to red.
+   - **No verdict** (a food whose group cannot be worked out, or one with no
+     calorie data) → their choice is logged unchallenged.
 4. Whatever they chose is what gets logged. A disagreement they stood by is
    flagged `overridden`, so coaches can see where a family's intuition and the
    protocol diverge — which is teaching signal, not an error.
@@ -97,7 +100,7 @@ light logic" slides set out. Every food goes through three questions:
 | Soup: broth-based & chowder      | 245 g        |        | ≤ 186  | above 186                   |
 | Soup: chili, bean/lentil & gumbo | 245 g        |        | ≤ 224  | above 224                   |
 | Condiments, dressings & ingredients | 15 g      |        | ≤ 23   | above 23                    |
-| Combination food                 | —            | no verdict: the family decides |  |                    |
+| Combination food                 | —            | the family decides; green or yellow is questioned |  |  |
 | Water, plain tea/coffee, seasonings | —         | no color |      |                             |
 
 The table is **data** in Firestore (`config/rules`), and every serving size and
@@ -117,7 +120,10 @@ the family's choice, and a guess is no grounds to question it.
 
 Combination foods are not taken apart. The prototype estimates each
 ingredient's share from the order of the label's ingredient list and adds up
-the red servings; that is left out for now, so the family decides.
+the red servings; that is left out for now. The family decides, and a green
+or yellow answer is questioned once with the guide's rule (FRG p.8). Their
+entry keeps `autoColor: null` and is not marked `overridden` either way, since
+the guide gave no verdict to override.
 
 `npm run test:rules` runs real-shaped USDA, Open Food Facts and hand-entered
 records through the server's mapping and the engine, and pins the results the

@@ -13,8 +13,9 @@ import type { Classification, EntryColor, FoodFacts, RuleSet } from "./types";
  * Juice, dried fruit and the fats/oils/sweets group are red whatever the
  * calories; water, plain tea/coffee and seasonings have no color; cold cereal
  * is also red above 25% of calories from sugar. Combination foods get no
- * verdict: the guide gives them no calorie range, so the family's own choice
- * stands. This mirrors classify() in the prototype, except that it abstains
+ * verdict: the guide gives them no calorie range, only the rule that one full
+ * serving of a red food in the dish makes it red. The family decides, and is
+ * asked once if they pick green or yellow (AddFoodSheet). This mirrors classify() in the prototype, except that it abstains
  * (color `null`) where the prototype asks the clinician to decide or falls
  * back to yellow: an undetected group, a combination food, or no calories.
  * The app's verdict only ever questions the family's choice, and a guess is
